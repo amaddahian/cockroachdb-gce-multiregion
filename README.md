@@ -181,6 +181,8 @@ terraform output -raw sql_connection_string_root   # marked sensitive
 
 ## Verification
 
+> For a fuller testing strategy — static checks, SQL sanity tests, plan-time checks, real-apply verification, failure-injection — see [TESTING.md](./TESTING.md).
+
 ```bash
 N1=$(terraform output -json node_external_ips | jq -r '.n1')
 
