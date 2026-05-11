@@ -52,31 +52,37 @@ Note: the CRDB `--locality` labels (`us-central`, `us-east-1`, `us-east-2`) are 
 
 The cluster brings itself up in this order:
 
-1. **Network**: a single global VPC with auto-subnets disabled, plus one `/24` subnet per region. Two firewall rules: `26257` + `8080` open between RFC1918 ranges (so the cluster gossips and you can reach the admin UI from a bastion or VPN), and `22` open from `var.admin_cidrs` for SSH.
-2. **VMs**: five `google_compute_instance` resources via `for_each` over a map of node specs (region, zone, locality label). Each VM gets a `pd-ssd` data disk mounted at `/mnt/data1` and a `metadata_startup_script` rendered from `scripts/node-startup.sh.tpl`.
-3. **Cert generation**: a `null_resource` runs `cockroach cert create-ca`, `create-node` (one per VM, with the node's hostname and internal IP in the SAN list), and `create-client root`. Output: a local `./certs/` directory.
-4. **Cert distribution**: a second `null_resource` SCPs each node's cert pair plus the CA to its target VM. The startup script blocks (`until [ -f /var/lib/cockroach/certs/node.crt ]; do sleep 2; done`) until certs land — this resolves the chicken-and-egg between "the VM exists so I can SCP" and "I need certs before starting CRDB."
-5. **Cluster init**: a third `null_resource` (depending on all node startup scripts having reached the cluster-init wait) SSHes to node 1 and runs `cockroach init` once. A marker file at `/var/lib/cockroach/.bootstrapped` makes this idempotent across re-applies.
-6. **Zone configs**: a fourth `null_resource` runs `cockroach sql --certs-dir=./certs --host=<node1-public-ip>` against `sql/zone-configs.sql` — applying the constraints, voter constraints, and lease preferences described below.
+1. **Network**: a single global VPC with auto-subnets disabled, plus one `/24` subnet per region. Four firewall rules:
+   - `allow-internal`: `26257` + `8080` between the three regional CIDRs (so the cluster gossips and the admin UI is reachable cross-region)
+   - `allow-ssh`: `22` from `var.admin_cidrs`
+   - `allow-admin-ui`: `8080` from `var.admin_cidrs`
+   - `allow-sql-external`: `26257` from `var.admin_cidrs`, so the local `cockroach sql` CLI can apply zone configs.
+2. **Static IPs**: 5 internal + 5 external `google_compute_address` reservations, created *before* the VMs. This lets the `--join` string be computed at plan time rather than chasing dynamic addresses post-boot.
+3. **VMs**: five `google_compute_instance` resources via `for_each` over a node map (region, zone, locality label). Each gets a 250 GB `pd-ssd` data disk mounted at `/mnt/data1` and a `metadata_startup_script` rendered from `scripts/node-startup.sh.tpl`. The startup script formats the disk, installs the CRDB tarball, and writes a `cockroach.service` systemd unit gated on `ConditionPathExists=/var/lib/cockroach/certs/node.crt` — so the unit stays inert until certs land.
+4. **Cert generation**: a `null_resource.certs` runs `cockroach cert create-ca`, then `create-node <internal-ip> <external-ip> crdb-<id> localhost 127.0.0.1` per VM (renaming each pair to `node.<id>.{crt,key}`), then `create-client root`. Output lands in `./certs/` (gitignored).
+5. **Cert distribution**: `null_resource.distribute_certs` (one per node) SSHes to each VM, SCPs the matching cert pair plus the CA into `/var/lib/cockroach/certs`, fixes ownership/perms, and runs `systemctl restart cockroach.service` — at which point `ConditionPathExists` is satisfied and CRDB starts.
+6. **Cluster init**: `null_resource.cluster_init` SSHes to n1, waits for `nc -z localhost 26257`, and runs `cockroach init` once. A marker file at `/var/lib/cockroach/.bootstrapped` makes this idempotent across re-applies.
+7. **Zone configs**: `null_resource.zone_configs` runs `cockroach sql --certs-dir=./certs --host=<n1-external-ip> --file=sql/zone-configs.sql` from your laptop, applying the constraints, voter constraints, and lease preferences described below. Triggered on `filemd5(sql/zone-configs.sql)`, so editing the SQL re-applies on the next `terraform apply`.
 
 ## Repo layout
 
 ```
 terraform-crdb-gcp/
 ├── README.md                # this file
-├── versions.tf              # terraform + google provider pins
-├── providers.tf             # google provider, project/region from vars
+├── .gitignore               # excludes state, *.tfvars, ./certs, ./ca-key
+├── versions.tf              # terraform + google + null + local provider pins
+├── providers.tf             # google provider, project from var.project_id
 ├── variables.tf             # project_id, admin_cidrs, crdb_version, machine_type, ...
-├── network.tf               # VPC, subnets per region, firewall rules
-├── nodes.tf                 # 5 google_compute_instance via for_each
-├── certs.tf                 # cockroach cert generation + distribution
+├── network.tf               # VPC, 3 regional subnets, 4 firewall rules
+├── nodes.tf                 # static IPs + data disks + 5 google_compute_instance
+├── certs.tf                 # cockroach cert generation + per-node distribution
 ├── init.tf                  # cockroach init + zone-config apply
-├── outputs.tf               # node public/internal IPs, connection string
+├── outputs.tf               # node IPs, admin UI URL, root SQL connection string
 ├── terraform.tfvars.example # template — copy to terraform.tfvars
 ├── scripts/
-│   └── node-startup.sh.tpl  # installs CRDB tarball, writes systemd unit, formats data disk
+│   └── node-startup.sh.tpl  # formats /mnt/data1, installs CRDB, writes systemd unit
 └── sql/
-    └── zone-configs.sql     # the multi-region zone configs (verbatim, see below)
+    └── zone-configs.sql     # the multi-region zone configs (Antigena line is TODO)
 ```
 
 ## The zone configs
@@ -138,45 +144,58 @@ ALTER TABLE system.public.transaction_statistics     CONFIGURE ZONE USING gc.ttl
 
 ## Quickstart
 
-Prerequisites:
+Prerequisites (all must be on the machine running `terraform apply`):
 
 - `terraform` >= 1.6
-- `cockroach` CLI installed locally (used by Terraform for cert generation): `brew install cockroachdb/tap/cockroach`
-- A GCP project with billing enabled and the Compute Engine API turned on
-- Application Default Credentials: `gcloud auth application-default login`
-- An SSH keypair (defaults to `~/.ssh/id_ed25519`)
+- `cockroach` CLI on `PATH` — used by Terraform's `local-exec` for both cert generation and zone-config apply: `brew install cockroachdb/tap/cockroach`
+- `gcloud` CLI authenticated with Application Default Credentials: `gcloud auth application-default login`
+- A GCP project with billing enabled and the Compute Engine API turned on (`gcloud services enable compute.googleapis.com`)
+- An SSH keypair (defaults to `~/.ssh/id_ed25519` / `~/.ssh/id_ed25519.pub`)
 
 Run:
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars
-# edit terraform.tfvars: project_id, admin_cidrs, ssh_pubkey_path
+# edit terraform.tfvars: project_id, admin_cidrs (your /32 at minimum), ssh_pubkey_path
 
 terraform init
 terraform apply
 ```
 
+What `apply` produces:
+
+- VPC + 3 regional subnets + 4 firewall rules
+- 5 static internal + 5 static external IPs
+- 5 GCE VMs, each with a 250 GB pd-ssd data disk
+- Local `./certs/` directory containing CA + per-node + root client certs
+- A live, initialized 5-node multi-region cluster with the zone configs applied
+
 When `apply` finishes, grab the outputs:
 
 ```bash
-terraform output node_public_ips
-terraform output sql_connection_string
+terraform output node_external_ips
+terraform output node_internal_ips
+terraform output admin_ui_url
+terraform output -raw sql_connection_string_root   # marked sensitive
 ```
 
 ## Verification
 
 ```bash
-# Should show 5 nodes, all live, with three distinct localities
-ssh crdb@<node1_ip> "cockroach node status \
+N1=$(terraform output -json node_external_ips | jq -r '.n1')
+
+# 5 nodes live, three distinct localities (us-central / us-east-1 / us-east-2)
+ssh crdb@$N1 "sudo -u cockroach /usr/local/bin/cockroach node status \
   --certs-dir=/var/lib/cockroach/certs --host=localhost"
 
 # Confirm the zone config landed correctly
-cockroach sql --certs-dir=./certs --host=<node1_public_ip> \
+cockroach sql --certs-dir=./certs --host=$N1:26257 \
   -e "SHOW ZONE CONFIGURATION FROM RANGE default"
 
 # Quick functional smoke test
-cockroach workload init kv     'postgresql://root@<node1_ip>:26257?sslmode=verify-full&sslrootcert=./certs/ca.crt&sslcert=./certs/client.root.crt&sslkey=./certs/client.root.key'
-cockroach workload run  kv --duration=30s 'postgresql://root@<node1_ip>:26257?...'
+URL="postgresql://root@$N1:26257?sslmode=verify-full&sslrootcert=./certs/ca.crt&sslcert=./certs/client.root.crt&sslkey=./certs/client.root.key"
+cockroach workload init kv "$URL"
+cockroach workload run  kv --duration=30s "$URL"
 ```
 
 ## Roadmap / out of scope
