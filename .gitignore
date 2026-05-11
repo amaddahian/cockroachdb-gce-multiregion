@@ -1,0 +1,14 @@
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# user-specific values
+*.tfvars
+!terraform.tfvars.example
+
+# generated TLS material — never commit
+certs/
+ca-key/
