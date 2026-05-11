@@ -22,14 +22,17 @@ What this catches: typos in resource refs, missing/wrong attributes, bad `for_ea
 
 ## Tier 2 — SQL sanity check against a local CRDB (zero cost, ~2 min)
 
-The zone-config SQL is the easiest thing to break and the hardest to spot at apply time — Terraform will dutifully ship a broken `ALTER ZONE` statement to the cluster and only fail when `cockroach sql --file=...` runs at the very end of a 15-minute apply. Catch it locally instead:
+The zone-config SQL is the easiest thing to break and the hardest to spot at apply time — Terraform will dutifully ship a broken `ALTER ZONE` statement to the cluster and only fail when `cockroach sql --file=...` runs at the very end of a 15-minute apply. Catch it locally instead.
+
+The constraint references locality labels (`region=us-central`, `region=us-east-1`, `region=us-east-2`), and CRDB validates that those labels actually exist on cluster nodes — so a single-node demo will reject the constraint immediately. Use `--demo-locality` to give the demo nodes the matching labels:
 
 ```bash
-cockroach demo --insecure --no-example-database --nodes=1 \
+cockroach demo --insecure --no-example-database --nodes=5 \
+  --demo-locality 'region=us-central:region=us-central:region=us-east-1:region=us-east-1:region=us-east-2' \
   --execute "$(cat sql/zone-configs.sql)"
 ```
 
-This spins up an in-process single-node cluster and applies the SQL. Parse errors and unknown identifiers fail immediately. (A few `ALTER TABLE` statements on system tables behave slightly differently on a single-node demo than on a multi-region cluster; that's fine — we're just looking for syntax problems here, not validating constraint semantics.)
+You should see one `CONFIGURE ZONE` line per `ALTER` statement (13 total with the current SQL — the Antigena-rewritten line is commented out). Parse errors, unknown identifiers, or unsatisfiable constraints fail immediately.
 
 ## Tier 3 — `terraform plan` against a real GCP project (zero infra cost, ~30 sec)
 

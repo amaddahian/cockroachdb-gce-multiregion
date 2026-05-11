@@ -1,9 +1,12 @@
 .terraform/
-.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
+*.tfplan
 crash.log
 crash.*.log
+
+# .terraform.lock.hcl is intentionally NOT ignored — it should be committed
+# so collaborators get identical provider versions (per Terraform docs).
 
 # user-specific values
 *.tfvars
