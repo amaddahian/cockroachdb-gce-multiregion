@@ -92,12 +92,24 @@ resource "null_resource" "distribute_certs" {
     destination = "/var/lib/cockroach/certs/node.key"
   }
 
+  # The root client cert is needed by `cockroach init` (run on n1) and is
+  # generally useful on every node for ad-hoc `cockroach sql` from the VM.
+  provisioner "file" {
+    source      = "${path.module}/certs/client.root.crt"
+    destination = "/var/lib/cockroach/certs/client.root.crt"
+  }
+
+  provisioner "file" {
+    source      = "${path.module}/certs/client.root.key"
+    destination = "/var/lib/cockroach/certs/client.root.key"
+  }
+
   provisioner "remote-exec" {
     inline = [
       "sudo chown -R cockroach:cockroach /var/lib/cockroach/certs",
       "sudo chmod 700 /var/lib/cockroach/certs",
-      "sudo chmod 600 /var/lib/cockroach/certs/node.key",
-      "sudo chmod 644 /var/lib/cockroach/certs/node.crt /var/lib/cockroach/certs/ca.crt",
+      "sudo chmod 600 /var/lib/cockroach/certs/node.key /var/lib/cockroach/certs/client.root.key",
+      "sudo chmod 644 /var/lib/cockroach/certs/node.crt /var/lib/cockroach/certs/ca.crt /var/lib/cockroach/certs/client.root.crt",
       "sudo systemctl restart cockroach.service",
     ]
   }

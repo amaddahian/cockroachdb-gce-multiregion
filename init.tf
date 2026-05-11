@@ -17,7 +17,8 @@ resource "null_resource" "cluster_init" {
 
   provisioner "remote-exec" {
     inline = [
-      "set -euo pipefail",
+      # `set -o pipefail` is bash-only; remote-exec runs through dash on Ubuntu.
+      "set -eu",
       # wait for the listener to come up
       "for i in $(seq 1 60); do nc -z localhost 26257 && break || sleep 2; done",
       "if [ ! -f /var/lib/cockroach/.bootstrapped ]; then",
