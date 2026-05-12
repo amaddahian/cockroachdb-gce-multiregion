@@ -51,6 +51,36 @@ The five tiers above:
 4. **Deployment & configuration** — the `cockroachdb` Ansible role runs storage → install → certs → service → init → zone_configs against the inventory.
 5. **Target cluster & persistent state** — a 5-node multi-region cluster with the topology-driven zone configs, TLS verify-full, and chrony for clock skew.
 
+The same flow as a Mermaid diagram (kept editable in the README source — GitHub renders it natively):
+
+```mermaid
+flowchart TD
+    classDef opt stroke-dasharray:5 5,fill:#fff8e1,color:#000
+    classDef store fill:#e8eaf6,stroke:#3949ab,color:#000
+    classDef cluster fill:#e1f5fe,stroke:#0277bd,color:#000
+
+    OP([Operator])
+    MK[Makefile<br/>init · apply · inventory · provision · deploy · destroy]
+
+    OP -->|"make deploy"| MK
+
+    MK -->|"1\. terraform apply"| TF[Terraform<br/>network · nodes · outputs<br/>+ dns.tf · lb.tf opt-in]
+    MK -->|"2\. ansible/inventory/render.sh"| BR[render.sh<br/>terraform output → YAML]
+    MK -->|"3\. ansible-playbook"| ANS[Ansible role: cockroachdb<br/>storage · install · certs ·<br/>service · init · zone_configs]
+
+    TF <-->|state| GCS[("GCS bucket<br/>versioned state<br/>+ rollback tags")]:::store
+
+    TF -->|creates| GCP[GCP infrastructure<br/>VPC · 3 subnets · 4 firewall rules<br/>5 × GCE n2-standard-4<br/>5 × pd-ssd · 10 static IPs<br/><i>opt:</i> Cloud DNS A records<br/><i>opt:</i> regional internal NLB]:::opt
+
+    TF -->|"outputs:<br/>nodes, ansible_group_vars,<br/>internal_lb_ip, dns_records"| BR
+    BR -->|"hosts.yml + group_vars/all.yml<br/>(crdb_topology, crdb_cache,<br/>crdb_lb_ip, crdb_dns_name)"| ANS
+
+    ANS -->|configures + bootstraps| CLUSTER[5-node multi-region CockroachDB<br/>2/2/1 voters · lease pref us-central<br/>TLS verify-full · chrony<br/>zone configs templated from topology]:::cluster
+    GCP -.provides VMs.-> CLUSTER
+
+    OP -.push or PR.-> CI[GitHub Actions CI<br/>terraform fmt + validate<br/>ansible-lint + syntax-check]
+```
+
 Bring-up order:
 
 1. **Network** (`terraform apply`): a global VPC with auto-subnets disabled, one `/24` subnet per region, and four firewall rules:
