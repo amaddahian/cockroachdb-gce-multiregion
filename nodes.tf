@@ -1,15 +1,21 @@
 locals {
-  nodes = {
-    n1 = { region = "us-central1", zone = "us-central1-a", locality = "us-central" }
-    n2 = { region = "us-central1", zone = "us-central1-b", locality = "us-central" }
-    n3 = { region = "us-east4", zone = "us-east4-a", locality = "us-east-1" }
-    n4 = { region = "us-east4", zone = "us-east4-b", locality = "us-east-1" }
-    n5 = { region = "us-east5", zone = "us-east5-a", locality = "us-east-2" }
-  }
+  # Walk topology in sorted-key order so n1..nN numbering is stable across
+  # re-applies. Each region's nodes are spread round-robin over its zones.
+  _topology_keys = sort(keys(var.topology))
 
-  join_string = join(",", [
-    for k, _ in local.nodes : "${google_compute_address.internal[k].address}:26257"
+  _nodes_list = flatten([
+    for locality_key in local._topology_keys : [
+      for i in range(var.topology[locality_key].node_count) : {
+        region   = var.topology[locality_key].region
+        zone     = var.topology[locality_key].zones[i % length(var.topology[locality_key].zones)]
+        locality = var.topology[locality_key].locality_label
+      }
+    ]
   ])
+
+  nodes = {
+    for i, n in local._nodes_list : "n${i + 1}" => n
+  }
 }
 
 resource "google_compute_address" "internal" {
@@ -65,18 +71,6 @@ resource "google_compute_instance" "crdb" {
 
   metadata = {
     ssh-keys = "${var.ssh_user}:${file(pathexpand(var.ssh_pubkey_path))}"
-  }
-
-  metadata_startup_script = templatefile("${path.module}/scripts/node-startup.sh.tpl", {
-    crdb_version   = var.crdb_version
-    locality_label = each.value.locality
-    gce_zone       = each.value.zone
-    join_string    = local.join_string
-    ssh_user       = var.ssh_user
-  })
-
-  service_account {
-    scopes = ["cloud-platform"]
   }
 
   allow_stopping_for_update = true

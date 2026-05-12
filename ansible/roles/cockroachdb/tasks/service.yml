@@ -1,0 +1,28 @@
+---
+- name: Install systemd unit for cockroach
+  ansible.builtin.template:
+    src: cockroach.service.j2
+    dest: "/etc/systemd/system/{{ crdb_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart cockroach
+
+- name: Reload systemd to pick up unit changes
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Flush handlers so any restart triggered by install/cert/template changes runs before init
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start cockroach
+  ansible.builtin.systemd:
+    name: "{{ crdb_service_name }}"
+    enabled: true
+    state: started
+
+- name: Wait for cockroach SQL port to accept connections
+  ansible.builtin.wait_for:
+    port: "{{ crdb_sql_port }}"
+    host: "{{ private_ip }}"
+    timeout: 120

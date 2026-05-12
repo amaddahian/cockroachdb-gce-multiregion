@@ -13,5 +13,12 @@ crash.*.log
 !terraform.tfvars.example
 
 # generated TLS material — never commit
-certs/
-ca-key/
+ansible/certs/
+
+# generated Ansible inventory + group_vars — content depends on terraform state
+ansible/inventory/hosts.yml
+ansible/inventory/group_vars/
+
+# Ansible runtime artifacts
+ansible/.ansible_facts/
+*.retry

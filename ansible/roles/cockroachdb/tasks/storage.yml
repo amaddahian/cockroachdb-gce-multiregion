@@ -1,0 +1,34 @@
+---
+- name: Wait for data volume device to appear
+  ansible.builtin.stat:
+    path: "{{ crdb_data_device }}"
+  register: device_stat
+  until: device_stat.stat.exists
+  retries: 30
+  delay: 2
+
+- name: Check if data volume has a filesystem
+  ansible.builtin.command:
+    cmd: "blkid {{ crdb_data_device }}"
+  register: blkid_result
+  changed_when: false
+  failed_when: false
+
+- name: Format data volume
+  ansible.builtin.command:
+    cmd: "mkfs.ext4 -F -E lazy_itable_init=0,lazy_journal_init=0,discard {{ crdb_data_device }}"
+  when: blkid_result.rc != 0
+
+- name: Create data directory
+  ansible.builtin.file:
+    path: "{{ crdb_data_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Mount data volume
+  ansible.posix.mount:
+    path: "{{ crdb_data_dir }}"
+    src: "{{ crdb_data_device }}"
+    fstype: ext4
+    state: mounted
+    opts: discard,defaults,noatime,nofail

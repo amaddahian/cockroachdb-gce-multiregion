@@ -1,0 +1,6 @@
+---
+- name: restart cockroach
+  ansible.builtin.systemd:
+    name: "{{ crdb_service_name }}"
+    state: restarted
+    daemon_reload: true

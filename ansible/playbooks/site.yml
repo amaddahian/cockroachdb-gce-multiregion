@@ -1,0 +1,27 @@
+---
+- name: Provision CockroachDB cluster
+  hosts: cockroachdb
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Sanity check — inventory must be non-empty
+      ansible.builtin.assert:
+        that:
+          - groups['cockroachdb'] is defined
+          - groups['cockroachdb'] | length > 0
+        fail_msg: "Inventory has no cockroachdb hosts. Run 'make inventory' (or ansible/inventory/render.sh) after terraform apply."
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+    - name: Sanity check — every host must carry locality and zone vars
+      ansible.builtin.assert:
+        that:
+          - private_ip is defined and private_ip | length > 0
+          - crdb_locality_label is defined and crdb_locality_label | length > 0
+          - crdb_gce_zone is defined and crdb_gce_zone | length > 0
+        fail_msg: "Host {{ inventory_hostname }} is missing private_ip / crdb_locality_label / crdb_gce_zone. Re-run inventory render."
+
+  roles:
+    - cockroachdb

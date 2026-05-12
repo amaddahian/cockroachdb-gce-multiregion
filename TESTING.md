@@ -6,19 +6,30 @@ This document walks through that order. Each tier costs more than the last (in t
 
 ## Tier 1 — static checks (zero cost, ~30 sec)
 
-The cheapest tests catch the most embarrassing bugs: unbalanced braces, references to resources that don't exist, provider-version drift.
+The cheapest tests catch the most embarrassing bugs: unbalanced braces, references to resources that don't exist, provider-version drift, malformed YAML, undefined Ansible variables.
 
 ```bash
 cd ~/scripts/terraform-crdb-gcp
-brew install terraform tflint        # if not already
+brew install terraform tflint ansible    # if not already
+pip install ansible-lint                  # for the lint step
 
-terraform fmt -check -recursive       # formatting
-terraform init                        # provider downloads parse
-terraform validate                    # schema + reference checks
-tflint --recursive                    # extra lint rules (optional)
+# Terraform
+terraform fmt -check -recursive
+terraform init
+terraform validate
+tflint --recursive                        # optional
+
+# Ansible
+cd ansible && ansible-lint                # role + playbook lint
+# syntax-check requires an inventory; once you've run terraform apply:
+ansible-playbook -i inventory/hosts.yml playbooks/site.yml --syntax-check
 ```
 
-What this catches: typos in resource refs, missing/wrong attributes, bad `for_each` keys, provider version mismatches, unformatted code. What it misses: anything semantic. `terraform validate` will happily approve a config that points to a project that doesn't exist or a region you don't have quota for.
+Or all of the above via `make verify` (after the inventory exists).
+
+What this catches: typos in resource refs, missing/wrong attributes, bad `for_each` keys, provider version mismatches, malformed Jinja, undefined Ansible variables, unformatted code. What it misses: anything semantic. `terraform validate` will happily approve a config that points to a project that doesn't exist or a region you don't have quota for; `ansible-lint` won't catch a wrong `become_user` for the actual remote user.
+
+**Backwards-compat invariant (whenever you touch `var.topology` or `local.nodes`)**: with default vars on a fresh state, `terraform plan` should show **28 resources to add** — VPC + 3 subnets + 4 firewall rules + 5 internal IPs + 5 external IPs + 5 disks + 5 instances. The opt-in DNS and LB resources only appear when their gating variables are set. Any unintended diff against this count means the topology derivation has drifted.
 
 ## Tier 2 — SQL sanity check against a local CRDB (zero cost, ~2 min)
 
@@ -49,52 +60,61 @@ What this catches: project ID typos, IAM/API gaps (Compute API not enabled, ADC 
 
 ## Tier 4 — real apply in a throwaway project (~$1.50/hr while running)
 
-This is the only way to test the bring-up sequence end-to-end: cert generation, distribution, init order, the systemd `ConditionPathExists` gate, the zone-config apply on a real cluster.
+This is the only way to test the bring-up sequence end-to-end: VM boot, the storage/install role, cert generation and distribution, the systemd `ConditionPathExists` gate, cluster init, and the zone-config apply on a real cluster.
 
 Cost math: 5× n2-standard-4 + 5× 250 GB pd-ssd + 5 external IPs ≈ **$1.50/hr (~$36/day)**. Stand it up, run the checks, tear it down.
 
 ```bash
-terraform apply -auto-approve
-# ~15 min: VMs boot, certs distribute, init runs, zone configs apply
+make deploy
+# ~10 min terraform apply (mostly VM boot) + ~5 min ansible-playbook
+# (storage format, chrony+cockroach install, certs, systemd, init, zone configs).
 
 N1=$(terraform output -json node_external_ips | jq -r '.n1')
+NODE_SQL='sudo -u cockroach /usr/local/bin/cockroach sql --certs-dir=/var/lib/cockroach/certs --host=localhost'
 
 # Check 1: cluster came up, all 5 nodes live with three localities
 ssh crdb@$N1 'sudo -u cockroach /usr/local/bin/cockroach node status \
   --certs-dir=/var/lib/cockroach/certs --host=localhost'
 
 # Check 2: localities wired correctly via --locality at start time
-cockroach sql --certs-dir=./certs --host=$N1:26257 -e \
-  "SELECT node_id, locality FROM crdb_internal.kv_node_status ORDER BY node_id"
+ssh crdb@$N1 "$NODE_SQL -e \
+  'SELECT node_id, locality FROM crdb_internal.kv_node_status ORDER BY node_id'"
 # expect: 2× region=us-central, 2× region=us-east-1, 1× region=us-east-2
 
 # Check 3: the SQL we wrote actually landed
-cockroach sql --certs-dir=./certs --host=$N1:26257 -e \
-  "SHOW ZONE CONFIGURATION FROM RANGE default"
+ssh crdb@$N1 "$NODE_SQL -e 'SHOW ZONE CONFIGURATION FROM RANGE default'"
 # expect: voter_constraints + lease_preferences match sql/zone-configs.sql verbatim
 
 # Check 4: the constraint produced the expected replica placement
-cockroach sql --certs-dir=./certs --host=$N1:26257 -e \
-  "SELECT range_id, replicas, replica_localities, lease_holder
-   FROM [SHOW RANGES FROM DATABASE defaultdb WITH DETAILS] LIMIT 5"
+ssh crdb@$N1 "$NODE_SQL -e \
+  'SELECT range_id, replicas, replica_localities, lease_holder
+   FROM [SHOW RANGES FROM DATABASE defaultdb WITH DETAILS] LIMIT 5'"
 # expect: 5 replicas each, 2/2/1 spread, lease in us-central
 
-# Check 5: TLS is properly verifying (not just accepting any cert)
-cockroach sql --certs-dir=./certs --host=$N1:26257 \
-  --url="postgresql://root@$N1:26257?sslmode=verify-full&sslrootcert=./certs/ca.crt&sslcert=./certs/client.root.crt&sslkey=./certs/client.root.key" \
-  -e "SELECT 1"
+# Check 5: TLS verify-full works against the live admin UI
+curl --cacert ansible/certs/ca.crt -fsS "$(terraform output -raw admin_ui_url)/health" && echo OK
 
-# Check 6: admin UI reachable from your admin_cidr
+# Check 6: admin UI reachable from your admin_cidr in a browser
 open "$(terraform output -raw admin_ui_url)"
 
-# Check 7: idempotency — second apply should be a no-op
+# Check 7: terraform idempotency — second apply should be a no-op
 terraform apply
 # expect: "No changes. Your infrastructure matches the configuration."
 
-terraform destroy -auto-approve
+# Check 8: ansible idempotency — second provision should report all ok/skipped, no changed
+make provision
+# expect: PLAY RECAP shows changed=0 across every host
+
+# Check 9: cert-mismatch guard — simulate lost controller CA, expect a clean abort
+mv ansible/certs ansible/certs.bak
+make provision
+# expect: play fails with "Existing node.crt found ... but the controller-side CA ... is missing"
+mv ansible/certs.bak ansible/certs
+
+make destroy
 ```
 
-If any of these fail, the bug is real and the fix needs to land before the next apply. The single most common class of failure here is a chicken-and-egg in the cert-distribution flow: if a node's startup script hasn't reached the `systemctl enable` step before `distribute_certs` tries to SSH in, the SSH provisioner will retry but the eventual `systemctl restart cockroach.service` will fail because the unit doesn't exist yet. The implementation accounts for this with timeouts and remote-exec waits — but it's worth watching the apply log the first time.
+If any of these fail, the bug is real and needs to land before the next apply. Watch the first run's Ansible output carefully — most issues surface in the certs role (SAN mismatches, ownership) or service role (missing locality vars in inventory).
 
 ## Tier 5 — failure injection (the test that actually validates the design)
 
@@ -105,31 +125,33 @@ The four tests below probe the boundary deliberately — each adds one more fail
 ```bash
 N3=$(terraform output -json node_external_ips | jq -r '.n3')
 
+# Helper: run cockroach sql on n3 with a SQL string. Avoids quoting headaches.
+crdb_sql() {
+  ssh crdb@"$N3" "sudo -u cockroach /usr/local/bin/cockroach sql \
+    --certs-dir=/var/lib/cockroach/certs --host=localhost -e \"$1\""
+}
+
 # --- Test A: lose 1 node in us-central (4/5 voters → quorum) ---
 gcloud compute instances stop crdb-n1 --zone=us-central1-a --quiet
-cockroach sql --certs-dir=./certs --host=$N3:26257 -e \
-  "CREATE DATABASE IF NOT EXISTS tier5;
-   CREATE TABLE IF NOT EXISTS tier5.t (id INT PRIMARY KEY, region STRING);
-   INSERT INTO tier5.t VALUES (1, 'wrote-after-n1-down');
-   SELECT * FROM tier5.t"
+crdb_sql "CREATE DATABASE IF NOT EXISTS tier5; \
+          CREATE TABLE IF NOT EXISTS tier5.t (id INT PRIMARY KEY, region STRING); \
+          INSERT INTO tier5.t VALUES (1, 'wrote-after-n1-down'); \
+          SELECT * FROM tier5.t"
 # Expect: write succeeds, table shows row 1.
 
 # --- Test B: also lose n2 (entire us-central down → 3/5 voters → quorum) ---
 gcloud compute instances stop crdb-n2 --zone=us-central1-b --quiet
 sleep 15  # give liveness time to update
-cockroach sql --certs-dir=./certs --host=$N3:26257 -e \
-  "INSERT INTO tier5.t VALUES (2, 'wrote-after-us-central-down')"
+crdb_sql "INSERT INTO tier5.t VALUES (2, 'wrote-after-us-central-down')"
 # Expect: write succeeds. Lease for system ranges has migrated to us-east-1
 # per lease_preferences. Verify with:
-cockroach sql --certs-dir=./certs --host=$N3:26257 -e \
-  "SELECT range_id, lease_holder
-   FROM [SHOW RANGES FROM TABLE system.public.replication_constraint_stats WITH DETAILS]"
+crdb_sql "SELECT range_id, lease_holder \
+          FROM [SHOW RANGES FROM TABLE system.public.replication_constraint_stats WITH DETAILS]"
 
 # --- Test C: also lose n5 (us-east-2 down → 2/5 voters → no quorum) ---
 gcloud compute instances stop crdb-n5 --zone=us-east5-a --quiet
 sleep 60  # leaderless detection takes ~1 min
-cockroach sql --certs-dir=./certs --host=$N3:26257 -e \
-  "INSERT INTO tier5.t VALUES (3, 'wrote-after-quorum-loss')"
+crdb_sql "INSERT INTO tier5.t VALUES (3, 'wrote-after-quorum-loss')"
 # Expect: explicit error, NOT infinite hang:
 #   ERROR: replica unavailable: ... lost quorum (down: ...) ...
 #          replica has been leaderless for 1m0s
@@ -137,8 +159,8 @@ cockroach sql --certs-dir=./certs --host=$N3:26257 -e \
 # --- Test D: restart n1, verify recovery ---
 gcloud compute instances start crdb-n1 --zone=us-central1-a --quiet
 sleep 60
-cockroach sql --certs-dir=./certs --host=$N3:26257 -e \
-  "INSERT INTO tier5.t VALUES (4, 'wrote-after-recovery'); SELECT * FROM tier5.t ORDER BY id"
+crdb_sql "INSERT INTO tier5.t VALUES (4, 'wrote-after-recovery'); \
+          SELECT * FROM tier5.t ORDER BY id"
 # Expect: write succeeds. Table shows rows 1, 2, 4 — id=3 from Test C's
 # lost-quorum attempt correctly never persisted, demonstrating that CRDB
 # preserved transactional atomicity through the failure window.
@@ -170,27 +192,29 @@ Tier 5 is too cluster-state-dependent for unsupervised automation. Run it manual
 
 The pattern: cheap things constantly, expensive things deliberately.
 
-## Findings from the first end-to-end run
+## Findings from the original null_resource scaffold
 
-A real Tier 4 + Tier 5 run against `cockroach-ali` (a permissive GCP project) and `cockroach-ephemeral` (a hardened CRL internal project) surfaced six concrete issues in the scaffold and one in the docs themselves. Documenting them here so the next person doesn't re-discover them.
+The first end-to-end runs (against `cockroach-ali` and `cockroach-ephemeral`) surfaced six issues with the original Terraform-only scaffold. The Ansible refactor either resolves them by construction or surfaces them more cleanly. Kept here as historical context — and to explain *why* the refactor.
 
-### Bugs in the scaffold
+### Resolved by the Ansible refactor
 
-1. **`set -o pipefail` in `init.tf` remote-exec broke `cluster_init`.** Terraform's `remote-exec` provisioner runs commands through the remote shell, which on Ubuntu is `/bin/sh` (dash). Dash doesn't support `set -o pipefail`. **Fixed**: `init.tf` now uses `set -eu`.
+1. **`set -o pipefail` in `init.tf` remote-exec broke `cluster_init`.** Terraform's `remote-exec` runs through `/bin/sh` (dash) on Ubuntu, which doesn't support `pipefail`. **Resolved**: there is no remote-exec anymore; init runs as a regular Ansible task.
 
-2. **Cert distribution missed `client.root.{crt,key}`.** `cockroach init` requires the root client cert to authenticate the init RPC, even when running on the node itself. The original `certs.tf` only pushed `ca.crt + node.{crt,key}`. **Fixed**: `certs.tf` now pushes `client.root.{crt,key}` too, and chowns/chmods them as the cockroach user.
+2. **Cert distribution missed `client.root.{crt,key}`.** `cockroach init` requires the root client cert. **Resolved**: the certs role distributes the root client cert to every node, with correct ownership/perms.
 
-3. **`zone_configs` raced node-join.** `cluster_init` exits as soon as the first node bootstraps the cluster, but the other 4 nodes may take a few more seconds to register. If `zone_configs` runs immediately, `ALTER ... CONFIGURE ZONE` can fail with `constraint "+region=X" matches no existing nodes` because not every region is represented yet. **Fixed**: `init.tf` `zone_configs` now polls `crdb_internal.kv_node_status` for `count == length(local.nodes)` (with a 2-min timeout) before applying the SQL.
+3. **`zone_configs` raced node-join.** The original `null_resource.zone_configs` could fire before all 5 nodes had registered, hitting `constraint "+region=X" matches no existing nodes`. **Resolved**: the `zone_configs.yml` task polls `crdb_internal.kv_node_status` until `count == groups['cockroachdb'] | length` (60 retries × 2s) before applying.
 
-4. **`metadata_startup_script` re-runs on every VM reboot.** GCE re-executes the startup script on each boot by default. The slow path (`apt-get update` + `apt-get install`) can take 10+ minutes against a slow mirror, so a spurious reboot mid-deploy can leave Terraform stuck waiting for `/var/lib/cockroach/certs/` to exist while the script is still pulling package lists. **Fixed**: `scripts/node-startup.sh.tpl` now skips the apt block entirely when all the tools it needs (`wget`, `tar`, `curl`, `mkfs.ext4`) are already installed — the common case on Ubuntu 22.04 LTS images. Reboots now finish the script in seconds rather than minutes. The other steps (mkfs, useradd, binary install, systemd unit write) were already idempotent.
+4. **`metadata_startup_script` re-ran on every VM reboot.** A GCE behavior — startup scripts execute on each boot. **Resolved**: the startup script is gone. Ansible runs only when invoked, never on boot.
 
-5. **No IAP / OS Login support.** The SSH provisioner assumes external SSH on port 22 from `var.admin_cidrs` works. In projects with `enable-oslogin = true` at the project level, metadata-based SSH keys are ignored — the `crdb` user injected via `metadata.ssh-keys` has no `~/.ssh/authorized_keys`, and SSH auth fails. **Not yet fixed**; would need either a `google_compute_firewall` rule for IAP (`35.235.240.0/20`) plus a `proxy_command`-based connection block, or a switch to OS Login users.
+### Still applicable
 
-6. **`admin_cidrs` is brittle behind multi-layer NAT.** `ifconfig.me` and `ipify.org` reported a different IP than the one our actual TCP egress used to reach GCE. Different "what's my IP" services are not equivalent — they reflect whichever NAT egress the *HTTP request* happened to hit. The first apply timed out for 5 minutes against a firewall rule that didn't actually cover the source IP of our SSH traffic. **Workaround documented**; if SSH times out and the firewall *looks* right, cross-check your egress IP with `curl -s https://checkip.amazonaws.com` (more reliable than HTTP-side IP services). **Not yet fixed in scaffold**; could optionally auto-detect from a known-good source or accept a wider CIDR.
+5. **No IAP / OS Login support.** Ansible reaches the VMs over external SSH from `admin_cidrs`. In projects with `enable-oslogin = true`, the `crdb` user injected via `metadata.ssh-keys` has no `~/.ssh/authorized_keys` and Ansible can't connect. Not yet addressed; would need an IAP firewall rule (`35.235.240.0/20`) and an `ansible_ssh_common_args` flag for IAP tunneling, or a switch to OS Login.
+
+6. **`admin_cidrs` is brittle behind multi-layer NAT.** Different "what's my IP" services report different egress IPs depending on which NAT path the HTTP request takes. If Ansible can't SSH to the VMs after `terraform apply`, cross-check your real egress IP with `curl -s https://checkip.amazonaws.com` before assuming anything else is wrong.
 
 ### Bug in this document
 
-7. **Tier 5 had a quorum-math error.** The earlier draft claimed losing all of us-central (2 nodes) would cause writes to hang. With 5 voters, losing 2 still leaves 3 — that's quorum. Writes still succeed; only the lease holder shifts. The actual quorum-loss boundary is losing **3 of 5** voters, which corresponds to losing us-central (2) plus us-east-2 (1). The Tier 5 section above has been rewritten with the correct boundary and the four-test sequence we actually ran.
+7. **Tier 5 had a quorum-math error.** An earlier draft claimed losing all of us-central (2 nodes) would cause writes to hang. With 5 voters, losing 2 still leaves 3 — that's quorum. The actual quorum-loss boundary is losing 3 of 5 voters, which corresponds to losing us-central (2) plus us-east-2 (1). Tier 5 above has the corrected sequence.
 
 ### What the run validated (Tier 4 + 5, both green on cockroach-ali)
 

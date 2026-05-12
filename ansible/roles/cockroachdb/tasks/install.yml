@@ -1,0 +1,79 @@
+---
+- name: Install chrony for time sync (CRDB requires <500ms clock skew)
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure chrony is enabled and running
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+
+- name: Create cockroach group
+  ansible.builtin.group:
+    name: "{{ crdb_group }}"
+    system: true
+    state: present
+
+- name: Create cockroach user
+  ansible.builtin.user:
+    name: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    home: "{{ crdb_state_dir }}"
+    shell: /usr/sbin/nologin
+    system: true
+    create_home: false
+
+- name: Create cockroach state, certs, and log directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ crdb_state_dir }}", mode: "0755" }
+    - { path: "{{ crdb_certs_dir }}", mode: "0700" }
+    - { path: "{{ crdb_log_dir }}",   mode: "0755" }
+
+- name: Set data directory ownership
+  ansible.builtin.file:
+    path: "{{ crdb_data_dir }}"
+    state: directory
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "0755"
+
+- name: Check if cockroach binary is already installed at the requested version
+  ansible.builtin.command:
+    cmd: "{{ crdb_install_dir }}/cockroach version --build-tag"
+  register: installed_version
+  changed_when: false
+  failed_when: false
+
+- name: Download CockroachDB tarball
+  ansible.builtin.get_url:
+    url: "https://binaries.cockroachdb.com/cockroach-{{ crdb_version }}.linux-{{ crdb_arch }}.tgz"
+    dest: "/tmp/cockroach-{{ crdb_version }}.linux-{{ crdb_arch }}.tgz"
+    mode: "0644"
+  when: installed_version.rc != 0 or installed_version.stdout | trim != crdb_version
+
+- name: Extract CockroachDB tarball
+  ansible.builtin.unarchive:
+    src: "/tmp/cockroach-{{ crdb_version }}.linux-{{ crdb_arch }}.tgz"
+    dest: /tmp
+    remote_src: true
+    creates: "/tmp/cockroach-{{ crdb_version }}.linux-{{ crdb_arch }}/cockroach"
+  when: installed_version.rc != 0 or installed_version.stdout | trim != crdb_version
+
+- name: Install cockroach binary
+  ansible.builtin.copy:
+    src: "/tmp/cockroach-{{ crdb_version }}.linux-{{ crdb_arch }}/cockroach"
+    dest: "{{ crdb_install_dir }}/cockroach"
+    mode: "0755"
+    remote_src: true
+  when: installed_version.rc != 0 or installed_version.stdout | trim != crdb_version
+  notify: restart cockroach
