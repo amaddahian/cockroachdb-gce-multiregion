@@ -1,0 +1,47 @@
+---
+# Wait for every node to register with the cluster, then apply the multi-region
+# zone configs. Without the wait, ALTER ... CONFIGURE ZONE fails with
+# 'constraint "+region=X" matches no existing nodes' on a fresh bring-up.
+
+- name: Wait for all nodes to register with the cluster
+  ansible.builtin.command:
+    cmd: >-
+      {{ crdb_install_dir }}/cockroach sql
+      --certs-dir={{ crdb_certs_dir }}
+      --host=localhost:{{ crdb_sql_port }}
+      --format=tsv
+      -e "SELECT count(*) FROM crdb_internal.kv_node_status"
+  register: node_count
+  changed_when: false
+  failed_when: false
+  retries: "{{ crdb_zone_configs_wait_retries }}"
+  delay: "{{ crdb_zone_configs_wait_delay }}"
+  until:
+    - node_count.rc == 0
+    - (node_count.stdout_lines | reject('match', '^count$') | list | first | default('0') | int) == (groups['cockroachdb'] | length)
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+
+- name: Copy zone-configs.sql to first node
+  ansible.builtin.copy:
+    src: "{{ crdb_zone_configs_src }}"
+    dest: "{{ crdb_zone_configs_dest }}"
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "0644"
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+
+- name: Apply zone configs
+  ansible.builtin.command:
+    cmd: >-
+      {{ crdb_install_dir }}/cockroach sql
+      --certs-dir={{ crdb_certs_dir }}
+      --host=localhost:{{ crdb_sql_port }}
+      --file={{ crdb_zone_configs_dest }}
+  register: zone_apply
+  # ALTER ... CONFIGURE ZONE is declarative + idempotent; the SQL output always
+  # contains "CONFIGURE ZONE", so don't use that as a changed signal.
+  changed_when: false
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true

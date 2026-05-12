@@ -1,0 +1,27 @@
+[Unit]
+Description=CockroachDB
+Requires=network-online.target
+After=network-online.target
+ConditionPathExists={{ crdb_certs_dir }}/node.crt
+
+[Service]
+Type=notify
+User={{ crdb_user }}
+Group={{ crdb_group }}
+WorkingDirectory={{ crdb_state_dir }}
+ExecStart={{ crdb_install_dir }}/cockroach start \
+  --certs-dir={{ crdb_certs_dir }} \
+  --store={{ crdb_data_dir }} \
+  --listen-addr=0.0.0.0:{{ crdb_sql_port }} \
+  --http-addr=0.0.0.0:{{ crdb_http_port }} \
+  --advertise-addr={{ private_ip }}:{{ crdb_sql_port }} \
+  --locality=cloud={{ crdb_locality_cloud }},region={{ crdb_locality_label }},zone={{ crdb_gce_zone }} \
+  --join={{ groups['cockroachdb'] | map('extract', hostvars, 'private_ip') | map('regex_replace', '$', ':' ~ crdb_sql_port) | join(',') }} \
+  --cache={{ crdb_cache }} --max-sql-memory={{ crdb_max_sql_memory }}
+TimeoutStopSec=300
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

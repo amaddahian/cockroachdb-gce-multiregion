@@ -1,0 +1,189 @@
+---
+# Cert flow:
+#   1. Stat the CA on the controller AND node.crt on every node.
+#   2. If node.crt exists anywhere AND the controller CA is missing -> abort.
+#      Silently regenerating the CA in that state would mismatch the live node
+#      certs and TLS handshakes would fail on the next service restart.
+#   3. If neither exists yet, generate the CA on the first node and fetch it
+#      back to the controller (treated as the durable source of truth).
+#   4. Push the shared CA cert to every node, plus the CA key to whichever
+#      nodes need it to sign per-node and root client certs.
+#   5. Generate per-node certs in place on each node (signed by the shared CA).
+#   6. Generate the root client cert on the first node (used by `cockroach init`
+#      and ad-hoc SQL); distribute to every node for operator convenience.
+#   7. Wipe the CA key from non-first nodes; keep on first node so it can
+#      sign cert rotations later.
+
+- name: Ensure controller CA dir exists
+  ansible.builtin.file:
+    path: "{{ crdb_ca_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Stat controller-side CA cert
+  ansible.builtin.stat:
+    path: "{{ crdb_ca_dir }}/ca.crt"
+  delegate_to: localhost
+  become: false
+  register: controller_ca
+  run_once: true
+
+- name: Stat node.crt on every node
+  ansible.builtin.stat:
+    path: "{{ crdb_certs_dir }}/node.crt"
+  register: existing_node_cert
+
+- name: Refuse to regenerate CA when live node certs exist (mismatch guard)
+  ansible.builtin.fail:
+    msg: |
+      Existing node.crt found on at least one node, but the controller-side CA
+      at {{ crdb_ca_dir }}/ca.crt is missing. Regenerating the CA now would
+      mismatch the live node certs and break TLS on the next restart.
+
+      Either restore the controller CA from backup, or destroy the cluster
+      (terraform destroy) and the node-side certs along with it before
+      re-provisioning.
+  when:
+    - not controller_ca.stat.exists
+    - existing_node_cert.stat.exists
+  run_once: true
+
+# --- Generate CA if first deploy ---
+
+- name: Generate CA on first node
+  ansible.builtin.command:
+    cmd: >-
+      {{ crdb_install_dir }}/cockroach cert create-ca
+      --certs-dir={{ crdb_certs_dir }}
+      --ca-key={{ crdb_certs_dir }}/ca.key
+    creates: "{{ crdb_certs_dir }}/ca.crt"
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+  when: not controller_ca.stat.exists
+
+- name: Fetch CA cert and key back to controller
+  ansible.builtin.fetch:
+    src: "{{ crdb_certs_dir }}/{{ item }}"
+    dest: "{{ crdb_ca_dir }}/{{ item }}"
+    flat: true
+  loop:
+    - ca.crt
+    - ca.key
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+  when: not controller_ca.stat.exists
+
+- name: Lock down CA files on the controller
+  ansible.builtin.file:
+    path: "{{ crdb_ca_dir }}/{{ item.name }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: ca.crt, mode: "0644" }
+    - { name: ca.key, mode: "0600" }
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+# --- Distribute CA cert to all nodes ---
+
+- name: Push CA cert to every node
+  ansible.builtin.copy:
+    src: "{{ crdb_ca_dir }}/ca.crt"
+    dest: "{{ crdb_certs_dir }}/ca.crt"
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "0644"
+  notify: restart cockroach
+
+- name: Push CA key to nodes that still need to sign their per-node cert
+  ansible.builtin.copy:
+    src: "{{ crdb_ca_dir }}/ca.key"
+    dest: "{{ crdb_certs_dir }}/ca.key"
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "0600"
+  when: not existing_node_cert.stat.exists
+
+# --- Per-node cert ---
+
+- name: Generate per-node certificate
+  ansible.builtin.command:
+    cmd: >-
+      {{ crdb_install_dir }}/cockroach cert create-node
+      {{ private_ip }}
+      {{ ansible_host }}
+      {{ inventory_hostname }}
+      {% if crdb_dns_name | length > 0 %}{{ crdb_dns_name }}{% endif %}
+      {% if crdb_lb_ip | length > 0 %}{{ crdb_lb_ip }}{% endif %}
+      localhost
+      127.0.0.1
+      --certs-dir={{ crdb_certs_dir }}
+      --ca-key={{ crdb_certs_dir }}/ca.key
+    creates: "{{ crdb_certs_dir }}/node.crt"
+  when: not existing_node_cert.stat.exists
+  notify: restart cockroach
+
+- name: Set ownership on per-node cert files
+  ansible.builtin.file:
+    path: "{{ crdb_certs_dir }}/{{ item.name }}"
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: node.crt, mode: "0644" }
+    - { name: node.key, mode: "0600" }
+
+# --- Root client cert (generated on first node, distributed to all) ---
+
+- name: Generate root client certificate on first node
+  ansible.builtin.command:
+    cmd: >-
+      {{ crdb_install_dir }}/cockroach cert create-client root
+      --certs-dir={{ crdb_certs_dir }}
+      --ca-key={{ crdb_certs_dir }}/ca.key
+    creates: "{{ crdb_certs_dir }}/client.root.crt"
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+
+- name: Fetch root client cert back to controller
+  ansible.builtin.fetch:
+    src: "{{ crdb_certs_dir }}/{{ item }}"
+    dest: "{{ crdb_ca_dir }}/{{ item }}"
+    flat: true
+  loop:
+    - client.root.crt
+    - client.root.key
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+
+- name: Distribute root client cert to all nodes
+  ansible.builtin.copy:
+    src: "{{ crdb_ca_dir }}/{{ item.name }}"
+    dest: "{{ crdb_certs_dir }}/{{ item.name }}"
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { name: client.root.crt, mode: "0644" }
+    - { name: client.root.key, mode: "0600" }
+
+# --- Lock down certs dir + clean up CA key from non-first nodes ---
+
+- name: Tighten certs dir permissions
+  ansible.builtin.file:
+    path: "{{ crdb_certs_dir }}"
+    state: directory
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "0700"
+
+- name: Remove CA key from non-first nodes
+  ansible.builtin.file:
+    path: "{{ crdb_certs_dir }}/ca.key"
+    state: absent
+  when:
+    - inventory_hostname != groups['cockroachdb'][0]
+    - not existing_node_cert.stat.exists

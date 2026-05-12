@@ -1,9 +1,7 @@
 locals {
-  regions = {
-    "us-central1" = "10.10.0.0/24"
-    "us-east4"    = "10.20.0.0/24"
-    "us-east5"    = "10.30.0.0/24"
-  }
+  # Derived from var.topology so region set + CIDRs can't drift from the
+  # node placement. Keyed by GCP region name (matches subnet for_each).
+  regions = { for k, v in var.topology : v.region => v.cidr }
 }
 
 resource "google_compute_network" "crdb" {

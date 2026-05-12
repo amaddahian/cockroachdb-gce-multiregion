@@ -1,0 +1,19 @@
+---
+- name: Storage setup
+  ansible.builtin.include_tasks: storage.yml
+
+- name: Install CockroachDB and chrony
+  ansible.builtin.include_tasks: install.yml
+
+- name: Generate and distribute TLS certs
+  ansible.builtin.include_tasks: certs.yml
+  when: crdb_secure_mode
+
+- name: Configure and start cockroach systemd unit
+  ansible.builtin.include_tasks: service.yml
+
+- name: Bootstrap cluster (first node only, idempotent)
+  ansible.builtin.include_tasks: init.yml
+
+- name: Apply multi-region zone configurations
+  ansible.builtin.include_tasks: zone_configs.yml

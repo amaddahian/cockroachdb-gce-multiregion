@@ -1,11 +1,75 @@
 project_id  = "my-gcp-project-id"
 admin_cidrs = ["1.2.3.4/32"]
 
-ssh_user         = "crdb"
-ssh_pubkey_path  = "~/.ssh/id_ed25519.pub"
-ssh_privkey_path = "~/.ssh/id_ed25519"
+ssh_user        = "crdb"
+ssh_pubkey_path = "~/.ssh/id_ed25519.pub"
 
-crdb_version      = "v25.4.0"
 machine_type      = "n2-standard-4"
 boot_disk_size_gb = 50
 data_disk_size_gb = 250
+
+# CockroachDB version is configured in ansible/roles/cockroachdb/defaults/main.yml
+# (variable: crdb_version). Override at provision time with: make provision EXTRA="-e crdb_version=vX.Y.Z"
+
+# --- Optional: CRDB runtime tuning ---
+# Sum should stay <= 0.8 to leave OS + RPC headroom.
+# crdb_cache          = ".40"
+# crdb_max_sql_memory = ".30"
+
+# --- Optional: cluster topology override ---
+# Default is the canonical 5-node 2/2/1 multi-region setup. Changing the
+# topology away from default also requires updating sql/zone-configs.sql,
+# which references the locality labels and assumes num_replicas=5.
+#
+# Example: 9-node 3/3/3 multi-region.
+# topology = {
+#   "us-central" = {
+#     region         = "us-central1"
+#     cidr           = "10.10.0.0/24"
+#     locality_label = "us-central"
+#     zones          = ["us-central1-a", "us-central1-b", "us-central1-c"]
+#     node_count     = 3
+#   }
+#   "us-east-1" = {
+#     region         = "us-east4"
+#     cidr           = "10.20.0.0/24"
+#     locality_label = "us-east-1"
+#     zones          = ["us-east4-a", "us-east4-b", "us-east4-c"]
+#     node_count     = 3
+#   }
+#   "us-east-2" = {
+#     region         = "us-east5"
+#     cidr           = "10.30.0.0/24"
+#     locality_label = "us-east-2"
+#     zones          = ["us-east5-a", "us-east5-b", "us-east5-c"]
+#     node_count     = 3
+#   }
+# }
+#
+# Example: single-region 3-node dev cluster (also requires editing sql/zone-configs.sql).
+# topology = {
+#   "us-central" = {
+#     region         = "us-central1"
+#     cidr           = "10.10.0.0/24"
+#     locality_label = "us-central"
+#     zones          = ["us-central1-a", "us-central1-b", "us-central1-c"]
+#     node_count     = 3
+#   }
+# }
+
+# --- Optional: DNS records ---
+# Set dns_managed_zone to an existing google_dns_managed_zone in this project.
+# Per-node FQDNs follow dns_name_template (use {n} for the node ordinal n1, n2, ...).
+# When set, each node's FQDN is automatically appended to its TLS cert SANs.
+#
+# dns_managed_zone     = "my-public-zone"
+# dns_name_template    = "crdb-{n}.cluster.example.com."
+# dns_use_internal_ips = false   # true for private zones
+
+# --- Optional: Internal regional load balancer ---
+# Creates a regional internal TCP NLB in front of port 26257 with backends
+# being all nodes in internal_lb_region. internal_lb_region must match one
+# of the regions in var.topology.
+#
+# create_internal_lb = true
+# internal_lb_region = "us-central1"

@@ -1,0 +1,58 @@
+---
+# CockroachDB role defaults — GCP-shaped.
+#
+# Per-host vars expected from inventory:
+#   private_ip            internal IP, used for advertise-addr and join
+#   ansible_host          external IP, also added to node cert SANs
+#   crdb_locality_label   CRDB locality region label (e.g. us-central, us-east-1)
+#   crdb_gce_zone         GCE zone (e.g. us-central1-a)
+#
+# Inventory hostnames must be set to crdb-n1, crdb-n2, ... so they end up
+# in node cert SANs (cockroach cert create-node uses inventory_hostname).
+
+crdb_version: "v25.4.0"
+crdb_arch: amd64
+
+crdb_user: cockroach
+crdb_group: cockroach
+
+crdb_install_dir: /usr/local/bin
+crdb_data_device: /dev/disk/by-id/google-crdb-data
+crdb_data_dir: /mnt/data1
+crdb_certs_dir: /var/lib/cockroach/certs
+crdb_log_dir: /var/log/cockroach
+crdb_state_dir: /var/lib/cockroach
+crdb_bootstrapped_marker: /var/lib/cockroach/.bootstrapped
+
+crdb_sql_port: 26257
+crdb_http_port: 8080
+
+crdb_secure_mode: true
+crdb_service_name: cockroach
+
+crdb_locality_cloud: gce
+
+# Per-host DNS hostname; populated by inventory render.sh when var.dns_managed_zone
+# is set on the Terraform side. Empty here so `is defined` works in templates
+# and certs SAN logic regardless of whether DNS is enabled.
+crdb_dns_name: ""
+
+# Cluster-wide internal LB IP, populated from group_vars/all.yml when
+# var.create_internal_lb is true. Added to every node cert's SANs so clients
+# can connect to --host=<lb_ip> with sslmode=verify-full.
+crdb_lb_ip: ""
+
+# Where the CA cert and key get fetched back to on the controller.
+# Single source of truth across re-runs — losing this dir while the
+# cluster still has node certs is detected and refused (see certs.yml).
+crdb_ca_dir: "{{ playbook_dir }}/../certs"
+
+# Cockroach memory tuning. Sum should stay <= 0.8 to leave headroom.
+crdb_cache: ".25"
+crdb_max_sql_memory: ".25"
+
+# Zone-config SQL: copied to first node and applied after all nodes register.
+crdb_zone_configs_src: "{{ playbook_dir }}/../../sql/zone-configs.sql"
+crdb_zone_configs_dest: "/var/lib/cockroach/zone-configs.sql"
+crdb_zone_configs_wait_retries: 60
+crdb_zone_configs_wait_delay: 2

@@ -1,0 +1,39 @@
+---
+# One-shot cluster init on the first node. Belt-and-braces idempotency:
+#   - creates: marker file (won't run if marker exists)
+#   - failed_when: ignores 'cluster has already been initialized' string in
+#     case the marker was lost but the cluster was already up.
+
+- name: Check whether cluster has already been bootstrapped
+  ansible.builtin.stat:
+    path: "{{ crdb_bootstrapped_marker }}"
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  register: bootstrapped
+  run_once: true
+
+- name: Initialize cockroach cluster
+  ansible.builtin.command:
+    cmd: >-
+      {{ crdb_install_dir }}/cockroach init
+      --certs-dir={{ crdb_certs_dir }}
+      --host=localhost:{{ crdb_sql_port }}
+  register: init_result
+  changed_when: init_result.rc == 0
+  failed_when:
+    - init_result.rc != 0
+    - "'already' not in init_result.stderr"
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+  when: not bootstrapped.stat.exists
+
+- name: Drop bootstrapped marker so we don't try init again
+  ansible.builtin.file:
+    path: "{{ crdb_bootstrapped_marker }}"
+    state: touch
+    owner: "{{ crdb_user }}"
+    group: "{{ crdb_group }}"
+    mode: "0644"
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+  when: not bootstrapped.stat.exists
+  changed_when: false

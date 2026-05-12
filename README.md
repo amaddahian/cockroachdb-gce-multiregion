@@ -18,6 +18,8 @@ We want survivability across three geographic regions: Chicago-ish, Ashburn, and
 | `us-east-1`              | us-east4    | `us-east4-a`, `us-east4-b`       | 2 |
 | `us-east-2`              | us-east5    | `us-east5-a`                     | 1 |
 
+![CockroachDB multi-region topology on GCE](./CRDB-Diagram.png)
+
 ```
                  ┌─────────────────── VPC (global) ──────────────────┐
                  │                                                    │
@@ -50,37 +52,54 @@ Note: the CRDB `--locality` labels (`us-central`, `us-east-1`, `us-east-2`) are 
 
 ## Architecture walkthrough
 
-The cluster brings itself up in this order:
+Two halves with a clean seam:
 
-1. **Network**: a single global VPC with auto-subnets disabled, plus one `/24` subnet per region. Four firewall rules:
-   - `allow-internal`: `26257` + `8080` between the three regional CIDRs (so the cluster gossips and the admin UI is reachable cross-region)
-   - `allow-ssh`: `22` from `var.admin_cidrs`
+- **Terraform** owns infra: VPC, subnets, firewalls, static IPs, data disks, VMs. That's it.
+- **Ansible** owns everything inside the VMs: storage formatting, CRDB install, TLS certs, systemd, cluster init, zone-config apply.
+
+Bring-up order:
+
+1. **Network** (`terraform apply`): a global VPC with auto-subnets disabled, one `/24` subnet per region, and four firewall rules:
+   - `allow-internal`: `26257` + `8080` between the three regional CIDRs (gossip + cross-region admin UI)
+   - `allow-ssh`: `22` from `var.admin_cidrs` (Ansible needs SSH)
    - `allow-admin-ui`: `8080` from `var.admin_cidrs`
-   - `allow-sql-external`: `26257` from `var.admin_cidrs`, so the local `cockroach sql` CLI can apply zone configs.
-2. **Static IPs**: 5 internal + 5 external `google_compute_address` reservations, created *before* the VMs. This lets the `--join` string be computed at plan time rather than chasing dynamic addresses post-boot.
-3. **VMs**: five `google_compute_instance` resources via `for_each` over a node map (region, zone, locality label). Each gets a 250 GB `pd-ssd` data disk mounted at `/mnt/data1` and a `metadata_startup_script` rendered from `scripts/node-startup.sh.tpl`. The startup script formats the disk, installs the CRDB tarball, and writes a `cockroach.service` systemd unit gated on `ConditionPathExists=/var/lib/cockroach/certs/node.crt` — so the unit stays inert until certs land.
-4. **Cert generation**: a `null_resource.certs` runs `cockroach cert create-ca`, then `create-node <internal-ip> <external-ip> crdb-<id> localhost 127.0.0.1` per VM (renaming each pair to `node.<id>.{crt,key}`), then `create-client root`. Output lands in `./certs/` (gitignored).
-5. **Cert distribution**: `null_resource.distribute_certs` (one per node) SSHes to each VM, SCPs the matching cert pair plus the CA into `/var/lib/cockroach/certs`, fixes ownership/perms, and runs `systemctl restart cockroach.service` — at which point `ConditionPathExists` is satisfied and CRDB starts.
-6. **Cluster init**: `null_resource.cluster_init` SSHes to n1, waits for `nc -z localhost 26257`, and runs `cockroach init` once. A marker file at `/var/lib/cockroach/.bootstrapped` makes this idempotent across re-applies.
-7. **Zone configs**: `null_resource.zone_configs` runs `cockroach sql --certs-dir=./certs --host=<n1-external-ip> --file=sql/zone-configs.sql` from your laptop, applying the constraints, voter constraints, and lease preferences described below. Triggered on `filemd5(sql/zone-configs.sql)`, so editing the SQL re-applies on the next `terraform apply`.
+   - `allow-sql-external`: `26257` from `var.admin_cidrs` — optional now (Ansible runs SQL on the first node), kept so you can still drive `cockroach sql` from your laptop if you want.
+2. **Static IPs** (`terraform apply`): 5 internal + 5 external `google_compute_address` reservations created *before* the VMs, so Ansible can build the `--join` string deterministically.
+3. **VMs** (`terraform apply`): five `google_compute_instance` resources via `for_each` over a node map (region, zone, locality label). Each gets a 250 GB `pd-ssd` data disk. No startup script — the GCE guest agent provisions the SSH user from instance metadata, and Ansible takes over from there.
+4. **Inventory render** (`make inventory`): `ansible/inventory/render.sh` reads `terraform output -json nodes` and emits `ansible/inventory/hosts.yml` with one entry per node, carrying `ansible_host` (external IP), `private_ip`, `crdb_locality_label`, and `crdb_gce_zone`.
+5. **Storage + install** (`make provision` → role tasks `storage.yml`, `install.yml`): formats `/dev/disk/by-id/google-crdb-data` if needed, mounts at `/mnt/data1`, installs `chrony` (CRDB requires <500ms clock skew), creates the `cockroach` user, downloads the pinned CRDB tarball, installs the binary to `/usr/local/bin/cockroach`.
+6. **Certs** (role task `certs.yml`): on the first node, generates a CA via `cockroach cert create-ca`; fetches `ca.crt` + `ca.key` back to the controller (`ansible/certs/`, gitignored) as the durable source of truth. Pushes the CA to every node, generates per-node certs in place (SANs: internal IP, external IP, `crdb-<id>`, `localhost`, `127.0.0.1`), generates the root client cert on the first node and distributes it. Removes the CA key from non-first nodes. **Mismatch guard**: if the controller CA is missing but any node already has a `node.crt`, the play aborts loudly rather than silently rotating to a new CA that would break TLS on the next restart.
+7. **Service** (role task `service.yml`): renders `cockroach.service` from a Jinja template (with `--locality=cloud=gce,region=<label>,zone=<gce-zone>` per host, `ConditionPathExists=node.crt`, `--join` built from inventory), enables and starts it, waits for the SQL port to accept connections.
+8. **Init** (role task `init.yml`): runs `cockroach init` once on the first node, idempotent via the `/var/lib/cockroach/.bootstrapped` marker file plus a substring match on the "already initialized" stderr in case the marker is missing.
+9. **Zone configs** (role task `zone_configs.yml`): waits for all expected nodes to register (polls `count(*) FROM crdb_internal.kv_node_status`), copies `sql/zone-configs.sql` to the first node, runs `cockroach sql --file=…` against it. All `ALTER … CONFIGURE ZONE` statements are idempotent.
 
 ## Repo layout
 
 ```
 terraform-crdb-gcp/
 ├── README.md                # this file
-├── .gitignore               # excludes state, *.tfvars, ./certs, ./ca-key
+├── TESTING.md               # tiered testing strategy
+├── Makefile                 # init/plan/apply/inventory/provision/deploy/destroy/clean
+├── .gitignore
 ├── versions.tf              # terraform + google + null + local provider pins
 ├── providers.tf             # google provider, project from var.project_id
-├── variables.tf             # project_id, admin_cidrs, crdb_version, machine_type, ...
+├── variables.tf             # project_id, admin_cidrs, machine_type, disk sizes, ...
 ├── network.tf               # VPC, 3 regional subnets, 4 firewall rules
 ├── nodes.tf                 # static IPs + data disks + 5 google_compute_instance
-├── certs.tf                 # cockroach cert generation + per-node distribution
-├── init.tf                  # cockroach init + zone-config apply
-├── outputs.tf               # node IPs, admin UI URL, root SQL connection string
+├── outputs.tf               # node IPs, admin UI URL, structured `nodes` output for inventory
 ├── terraform.tfvars.example # template — copy to terraform.tfvars
-├── scripts/
-│   └── node-startup.sh.tpl  # formats /mnt/data1, installs CRDB, writes systemd unit
+├── ansible/
+│   ├── ansible.cfg
+│   ├── playbooks/site.yml
+│   ├── inventory/
+│   │   ├── render.sh        # generates hosts.yml from terraform outputs
+│   │   └── hosts.yml        # generated; gitignored
+│   ├── certs/               # generated CA + root client cert; gitignored
+│   └── roles/cockroachdb/
+│       ├── defaults/main.yml
+│       ├── handlers/main.yml
+│       ├── templates/cockroach.service.j2
+│       └── tasks/{main,storage,install,certs,service,init,zone_configs}.yml
 └── sql/
     └── zone-configs.sql     # the multi-region zone configs (Antigena line is TODO)
 ```
@@ -144,13 +163,15 @@ ALTER TABLE system.public.transaction_statistics     CONFIGURE ZONE USING gc.ttl
 
 ## Quickstart
 
-Prerequisites (all must be on the machine running `terraform apply`):
+Prerequisites (all on the machine running `make deploy`):
 
 - `terraform` >= 1.6
-- `cockroach` CLI on `PATH` — used by Terraform's `local-exec` for both cert generation and zone-config apply: `brew install cockroachdb/tap/cockroach`
+- `ansible` >= 2.15 (`pip install ansible` or `brew install ansible`)
+- `jq` (used by `inventory/render.sh`)
 - `gcloud` CLI authenticated with Application Default Credentials: `gcloud auth application-default login`
 - A GCP project with billing enabled and the Compute Engine API turned on (`gcloud services enable compute.googleapis.com`)
 - An SSH keypair (defaults to `~/.ssh/id_ed25519` / `~/.ssh/id_ed25519.pub`)
+- **No `cockroach` CLI required** on the operator machine — Ansible runs cert generation and SQL on the first node.
 
 Run:
 
@@ -158,25 +179,34 @@ Run:
 cp terraform.tfvars.example terraform.tfvars
 # edit terraform.tfvars: project_id, admin_cidrs (your /32 at minimum), ssh_pubkey_path
 
-terraform init
-terraform apply
+make init
+make deploy   # = terraform apply + render inventory + ansible-playbook
 ```
 
-What `apply` produces:
+What `make deploy` produces:
 
 - VPC + 3 regional subnets + 4 firewall rules
 - 5 static internal + 5 static external IPs
-- 5 GCE VMs, each with a 250 GB pd-ssd data disk
-- Local `./certs/` directory containing CA + per-node + root client certs
+- 5 GCE VMs with `chrony` and `cockroach` installed and a 250 GB `pd-ssd` data disk mounted at `/mnt/data1`
+- `ansible/certs/` (gitignored) on the operator machine containing CA + root client cert
+- `ansible/inventory/hosts.yml` (gitignored) for re-runs
 - A live, initialized 5-node multi-region cluster with the zone configs applied
 
-When `apply` finishes, grab the outputs:
+Useful outputs:
 
 ```bash
 terraform output node_external_ips
 terraform output node_internal_ips
 terraform output admin_ui_url
 terraform output -raw sql_connection_string_root   # marked sensitive
+```
+
+Re-running the playbook on its own:
+
+```bash
+make provision               # full role
+make provision EXTRA="--tags certs"
+make provision-check         # --check --diff dry-run
 ```
 
 ## Verification
@@ -190,28 +220,112 @@ N1=$(terraform output -json node_external_ips | jq -r '.n1')
 ssh crdb@$N1 "sudo -u cockroach /usr/local/bin/cockroach node status \
   --certs-dir=/var/lib/cockroach/certs --host=localhost"
 
-# Confirm the zone config landed correctly
-cockroach sql --certs-dir=./certs --host=$N1:26257 \
-  -e "SHOW ZONE CONFIGURATION FROM RANGE default"
+# Confirm the zone config landed correctly (run on a node — no laptop CLI needed)
+ssh crdb@$N1 "sudo -u cockroach /usr/local/bin/cockroach sql \
+  --certs-dir=/var/lib/cockroach/certs --host=localhost \
+  -e 'SHOW ZONE CONFIGURATION FROM RANGE default'"
 
-# Quick functional smoke test
-URL="postgresql://root@$N1:26257?sslmode=verify-full&sslrootcert=./certs/ca.crt&sslcert=./certs/client.root.crt&sslkey=./certs/client.root.key"
-cockroach workload init kv "$URL"
-cockroach workload run  kv --duration=30s "$URL"
+# Quick functional smoke test (also from the node)
+ssh crdb@$N1 "sudo -u cockroach /usr/local/bin/cockroach workload init kv \
+  'postgresql://root@localhost:26257?sslmode=verify-full&sslrootcert=/var/lib/cockroach/certs/ca.crt&sslcert=/var/lib/cockroach/certs/client.root.crt&sslkey=/var/lib/cockroach/certs/client.root.key'"
 ```
+
+### CA lifecycle
+
+The CA cert and key live at `ansible/certs/{ca.crt,ca.key}` on the operator machine and are the durable source of truth.
+
+- `terraform destroy` does **not** remove them. Recreating a cluster reuses the same CA, so existing client cert material continues to work.
+- `make clean-ca` deletes `ansible/certs/` and forces a fresh CA on the next `make provision`. Use this when you actually want to rotate.
+- If `ansible/certs/` is missing but VMs already have node certs from a previous deploy, the certs play **aborts loudly** rather than silently regenerating a mismatched CA.
+
+## Configuration
+
+Defaults reproduce the canonical 5-node 2/2/1 multi-region setup. All knobs below are optional — set in `terraform.tfvars` or pass via `-var`.
+
+### Required
+
+| Variable | Description |
+|---|---|
+| `project_id` | GCP project where the cluster runs. |
+| `admin_cidrs` | Source CIDRs allowed for SSH (Ansible) and admin UI access. Use a `/32` or your VPN CIDR. |
+
+### Common (optional)
+
+| Variable | Default | Description |
+|---|---|---|
+| `ssh_user` | `crdb` | Linux user provisioned via instance metadata. |
+| `ssh_pubkey_path` | `~/.ssh/id_ed25519.pub` | Public key installed on each VM. |
+| `machine_type` | `n2-standard-4` | GCE shape per node. |
+| `boot_disk_size_gb` | `50` | OS disk size. |
+| `data_disk_size_gb` | `250` | CRDB store disk (`pd-ssd`). |
+| `network_name` | `crdb` | Prefix for VPC + firewall + IP names. |
+| `crdb_cache` | `.25` | `--cache=` fraction of node RAM. |
+| `crdb_max_sql_memory` | `.25` | `--max-sql-memory=` fraction. Sum with cache should stay ≤0.8. |
+
+CRDB version is set in `ansible/roles/cockroachdb/defaults/main.yml` (`crdb_version: v25.4.0`). Override at provision time with `make provision EXTRA="-e crdb_version=vX.Y.Z"`.
+
+### Topology (optional)
+
+`var.topology` controls cluster size, region selection, and per-region zone spread. The default produces 5 nodes 2/2/1 across `us-central1`, `us-east4`, `us-east5`. To change shape, override the whole map. Node ordinals (`n1..nN`) are assigned by walking the map in sorted-key order.
+
+```hcl
+# 9-node 3/3/3 multi-region:
+topology = {
+  "us-central" = { region = "us-central1", cidr = "10.10.0.0/24",
+                   locality_label = "us-central",
+                   zones = ["us-central1-a","us-central1-b","us-central1-c"], node_count = 3 }
+  "us-east-1"  = { region = "us-east4",    cidr = "10.20.0.0/24",
+                   locality_label = "us-east-1",
+                   zones = ["us-east4-a","us-east4-b","us-east4-c"], node_count = 3 }
+  "us-east-2"  = { region = "us-east5",    cidr = "10.30.0.0/24",
+                   locality_label = "us-east-2",
+                   zones = ["us-east5-a","us-east5-b","us-east5-c"], node_count = 3 }
+}
+```
+
+> **Heads up**: changing topology away from default also requires editing `sql/zone-configs.sql`. The default SQL hardcodes `+region=us-central`, `+region=us-east-1`, `+region=us-east-2` and `num_replicas=5` / `num_voters=5`. Templating the zone-config SQL is a follow-up.
+
+### DNS (opt-in)
+
+Set `dns_managed_zone` to an existing `google_dns_managed_zone` in your project to get per-node A records and a round-robin `crdb-any.<zone>` record. The FQDNs are automatically added to each node's TLS cert SANs, so clients can connect with `sslmode=verify-full` against the hostname.
+
+```hcl
+dns_managed_zone     = "my-public-zone"
+dns_name_template    = "crdb-{n}.cluster.example.com."   # trailing dot required
+dns_use_internal_ips = false   # true for private zones
+```
+
+`terraform output dns_records` lists the FQDNs once created.
+
+### Internal load balancer (opt-in)
+
+A regional internal TCP NLB in front of the SQL port, backed by all nodes in a single region. Lets in-VPC clients connect to one VIP instead of pinning to a node.
+
+```hcl
+create_internal_lb = true
+internal_lb_region = "us-central1"   # must be one of var.topology[*].region
+```
+
+`terraform output internal_lb_ip` exposes the VIP. From a node:
+
+```bash
+cockroach sql --certs-dir=/var/lib/cockroach/certs --host=<LB_IP>:26257 -e 'SELECT 1'
+```
+
+External LB and a load-balancer-aware DNS record are not in scope today.
 
 ## Roadmap / out of scope
 
 What this repo intentionally does **not** do today:
 
-- No load balancer (per-node IPs only)
-- No backup schedule or `BACKUP` configuration
+- No external load balancer (opt-in internal LB exists)
+- No backup schedule or `BACKUP` configuration (operator-driven for now)
 - No Prometheus / Datadog / metrics scraping
-- No DNS records — node IPs are ephemeral across recreates
 - No tenant / serverless setup
-- No autoscaling (CRDB doesn't scale that way anyway, but no group-managed instance group is created either)
+- No autoscaling
+- Zone-config SQL is not templated — custom topologies need a hand-edited `sql/zone-configs.sql`
 
-Reasonable next steps: regional internal TCP load balancers, a `BACKUP INTO ...` cron, a Prometheus node-exporter sidecar, and a `google_dns_record_set` per region for stable client endpoints.
+Reasonable next steps: an external NLB option, a `BACKUP INTO 'gs://...'` schedule (which would also need a dedicated VM service account with bucket write access), Prometheus node-exporter, and templating the zone-config SQL so non-default topologies don't need manual SQL edits.
 
 ## License & contributing
 
