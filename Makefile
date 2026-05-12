@@ -39,10 +39,15 @@ init:
 
 bootstrap-state:
 	@if [ -z "$$PROJECT_ID" ]; then echo "Set PROJECT_ID first: PROJECT_ID=my-project make bootstrap-state"; exit 1; fi
-	gsutil mb -p "$$PROJECT_ID" -l us-central1 -b on "gs://$$PROJECT_ID-tfstate-crdb"
-	gsutil versioning set on "gs://$$PROJECT_ID-tfstate-crdb"
+	@bucket="gs://$$PROJECT_ID-tfstate-crdb"; \
+	if gcloud storage buckets describe "$$bucket" --format="value(name)" >/dev/null 2>&1; then \
+	  echo "Bucket $$bucket already exists — skipping create."; \
+	else \
+	  gcloud storage buckets create "$$bucket" --project="$$PROJECT_ID" --location=us-central1 --uniform-bucket-level-access; \
+	fi
+	gcloud storage buckets update "gs://$$PROJECT_ID-tfstate-crdb" --versioning
 	@echo
-	@echo "Bucket created. Now copy backend.hcl.example -> backend.hcl,"
+	@echo "Bucket ready. Now copy backend.hcl.example -> backend.hcl,"
 	@echo "set bucket = \"$$PROJECT_ID-tfstate-crdb\", and run 'make init'."
 
 plan:
