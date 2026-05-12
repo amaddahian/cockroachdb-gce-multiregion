@@ -57,6 +57,34 @@ Two halves with a clean seam:
 - **Terraform** owns infra: VPC, subnets, firewalls, static IPs, data disks, VMs. That's it.
 - **Ansible** owns everything inside the VMs: storage formatting, CRDB install, TLS certs, systemd, cluster init, zone-config apply.
 
+```mermaid
+flowchart TD
+    classDef opt stroke-dasharray:5 5,fill:#fff8e1,color:#000
+    classDef store fill:#e8eaf6,stroke:#3949ab,color:#000
+    classDef cluster fill:#e1f5fe,stroke:#0277bd,color:#000
+
+    OP([Operator])
+    MK[Makefile<br/>init · apply · inventory · provision · deploy · destroy]
+
+    OP -->|"make deploy"| MK
+
+    MK -->|"1\. terraform apply"| TF[Terraform<br/>network · nodes · outputs<br/>+ dns.tf · lb.tf opt-in]
+    MK -->|"2\. ansible/inventory/render.sh"| BR[render.sh<br/>terraform output → YAML]
+    MK -->|"3\. ansible-playbook"| ANS[Ansible role: cockroachdb<br/>storage · install · certs ·<br/>service · init · zone_configs]
+
+    TF <-->|state| GCS[("GCS bucket<br/>versioned state<br/>+ rollback tags")]:::store
+
+    TF -->|creates| GCP[GCP infrastructure<br/>VPC · 3 subnets · 4 firewall rules<br/>5 × GCE n2-standard-4<br/>5 × pd-ssd · 10 static IPs<br/><i>opt:</i> Cloud DNS A records<br/><i>opt:</i> regional internal NLB]:::opt
+
+    TF -->|"outputs:<br/>nodes, ansible_group_vars,<br/>internal_lb_ip, dns_records"| BR
+    BR -->|"hosts.yml + group_vars/all.yml<br/>(crdb_topology, crdb_cache,<br/>crdb_lb_ip, crdb_dns_name)"| ANS
+
+    ANS -->|configures + bootstraps| CLUSTER[5-node multi-region CockroachDB<br/>2/2/1 voters · lease pref us-central<br/>TLS verify-full · chrony<br/>zone configs templated from topology]:::cluster
+    GCP -.provides VMs.-> CLUSTER
+
+    OP -.push or PR.-> CI[GitHub Actions CI<br/>terraform fmt + validate<br/>ansible-lint + syntax-check]
+```
+
 Bring-up order:
 
 1. **Network** (`terraform apply`): a global VPC with auto-subnets disabled, one `/24` subnet per region, and four firewall rules:
@@ -71,7 +99,7 @@ Bring-up order:
 6. **Certs** (role task `certs.yml`): on the first node, generates a CA via `cockroach cert create-ca`; fetches `ca.crt` + `ca.key` back to the controller (`ansible/certs/`, gitignored) as the durable source of truth. Pushes the CA to every node, generates per-node certs in place (SANs: internal IP, external IP, `crdb-<id>`, `localhost`, `127.0.0.1`), generates the root client cert on the first node and distributes it. Removes the CA key from non-first nodes. **Mismatch guard**: if the controller CA is missing but any node already has a `node.crt`, the play aborts loudly rather than silently rotating to a new CA that would break TLS on the next restart.
 7. **Service** (role task `service.yml`): renders `cockroach.service` from a Jinja template (with `--locality=cloud=gce,region=<label>,zone=<gce-zone>` per host, `ConditionPathExists=node.crt`, `--join` built from inventory), enables and starts it, waits for the SQL port to accept connections.
 8. **Init** (role task `init.yml`): runs `cockroach init` once on the first node, idempotent via the `/var/lib/cockroach/.bootstrapped` marker file plus a substring match on the "already initialized" stderr in case the marker is missing.
-9. **Zone configs** (role task `zone_configs.yml`): waits for all expected nodes to register (polls `count(*) FROM crdb_internal.kv_node_status`), copies `sql/zone-configs.sql` to the first node, runs `cockroach sql --file=…` against it. All `ALTER … CONFIGURE ZONE` statements are idempotent.
+9. **Zone configs** (role task `zone_configs.yml`): waits for all expected nodes to register (polls `count(*) FROM crdb_internal.kv_node_status`), renders `sql/zone-configs.sql.j2` from `crdb_topology` (sourced from `terraform output ansible_group_vars`) so `num_replicas`, `voter_constraints`, and `lease_preferences` track the live topology, then runs `cockroach sql --file=…` against the rendered file. All `ALTER … CONFIGURE ZONE` statements are idempotent.
 
 ## Repo layout
 
