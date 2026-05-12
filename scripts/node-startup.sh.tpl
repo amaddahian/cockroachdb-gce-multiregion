@@ -17,9 +17,19 @@ PRIVATE_IP=$(curl -fsS -H "Metadata-Flavor: Google" \
   http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip)
 
 # --- packages -----------------------------------------------------------
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y --no-install-recommends curl ca-certificates wget tar e2fsprogs
+# GCE re-runs metadata_startup_script on every boot. apt-get update can
+# take 10+ minutes against a slow mirror, so skip it entirely if every
+# tool we need is already installed (the common case on Ubuntu 22.04 LTS
+# images, where these are all preinstalled). This makes reboots cheap.
+NEED_APT=
+for cmd in wget tar curl mkfs.ext4; do
+  command -v "$cmd" >/dev/null 2>&1 || NEED_APT=1
+done
+if [ -n "$NEED_APT" ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y --no-install-recommends curl ca-certificates wget tar e2fsprogs
+fi
 
 # --- ssh user -----------------------------------------------------------
 if ! id "$SSH_USER" >/dev/null 2>&1; then

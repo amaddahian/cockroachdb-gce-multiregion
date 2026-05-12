@@ -31,6 +31,12 @@ resource "null_resource" "cluster_init" {
 
 # --- apply the multi-region zone configs -------------------------------
 # Re-applies whenever the SQL file changes (via filemd5 trigger).
+#
+# `cluster_init` exits as soon as n1 bootstraps the cluster, but the other
+# nodes can take a few more seconds to register. If we apply the zone configs
+# before all nodes are visible, ALTER ... CONFIGURE ZONE fails with
+# `constraint "+region=X" matches no existing nodes`. So we wait for the
+# expected node count to register before applying.
 resource "null_resource" "zone_configs" {
   depends_on = [null_resource.cluster_init]
 
@@ -44,9 +50,31 @@ resource "null_resource" "zone_configs" {
     command     = <<-EOT
       set -euo pipefail
       cd "${path.module}"
+
+      EXPECTED=${length(local.nodes)}
+      HOST=${google_compute_address.external["n1"].address}:26257
+
+      echo "waiting for all $EXPECTED nodes to register with the cluster..."
+      for i in $(seq 1 60); do
+        COUNT=$(cockroach sql --certs-dir=certs --host=$HOST \
+          -e "SELECT count(*) FROM crdb_internal.kv_node_status" \
+          --format=tsv 2>/dev/null | tail -n +2 || echo 0)
+        if [ "$COUNT" = "$EXPECTED" ]; then
+          echo "all $EXPECTED nodes registered"
+          break
+        fi
+        echo "  $COUNT/$EXPECTED registered, waiting..."
+        sleep 2
+      done
+
+      if [ "$COUNT" != "$EXPECTED" ]; then
+        echo "ERROR: only $COUNT/$EXPECTED nodes registered after 2 minutes" >&2
+        exit 1
+      fi
+
       cockroach sql \
         --certs-dir=certs \
-        --host=${google_compute_address.external["n1"].address}:26257 \
+        --host=$HOST \
         --file=sql/zone-configs.sql
     EOT
   }
