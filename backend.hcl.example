@@ -1,0 +1,9 @@
+# Copy to backend.hcl and fill in. Then run:
+#   make init    (which runs: terraform init -backend-config=backend.hcl)
+#
+# If you'd rather skip remote state entirely (demo/throwaway use), delete
+# the `backend "gcs" {}` block from versions.tf and run terraform init
+# without -backend-config — Terraform will fall back to local state.
+
+bucket = "<your-project-id>-tfstate-crdb"
+prefix = "crdb-cluster"

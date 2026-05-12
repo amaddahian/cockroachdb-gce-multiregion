@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs on the same branch when a new commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terraform:
+    name: terraform fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.0"
+
+      - name: terraform fmt -check -recursive
+        run: terraform fmt -check -recursive
+
+      - name: terraform init (no backend, no providers)
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        run: terraform validate
+
+  ansible:
+    name: ansible lint + syntax-check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ansible
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible + ansible-lint
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible-core ansible-lint
+          ansible-galaxy collection install ansible.posix community.general
+
+      - name: ansible-lint
+        # Deliberate exceptions (var-naming convention, run-once false-positive)
+        # are declared in ansible/.ansible-lint. Anything new should fail CI.
+        run: ansible-lint playbooks/site.yml
+
+      - name: Synthesize a minimal inventory for syntax-check
+        run: |
+          mkdir -p inventory
+          cat > inventory/hosts.yml <<'EOF'
+          all:
+            children:
+              cockroachdb:
+                hosts:
+                  crdb-n1:
+                    ansible_host: 198.51.100.1
+                    ansible_user: crdb
+                    ansible_python_interpreter: /usr/bin/python3
+                    private_ip: 10.10.0.1
+                    crdb_locality_label: us-central
+                    crdb_gce_zone: us-central1-a
+          EOF
+
+      - name: ansible-playbook --syntax-check
+        run: ansible-playbook -i inventory/hosts.yml playbooks/site.yml --syntax-check

@@ -10,7 +10,8 @@ RENDER      := $(ANSIBLE_DIR)/inventory/render.sh
 
 help:
 	@echo "Targets:"
-	@echo "  init             terraform init"
+	@echo "  bootstrap-state  one-time: PROJECT_ID=… make bootstrap-state — create the GCS state bucket"
+	@echo "  init             terraform init (uses backend.hcl if present, otherwise local state)"
 	@echo "  plan             terraform plan"
 	@echo "  apply            terraform apply"
 	@echo "  inventory        regenerate $(INVENTORY) from terraform outputs"
@@ -27,7 +28,22 @@ help:
 	@echo "  verify           validate + lint + syntax-check"
 
 init:
-	terraform init
+	@if [ -f backend.hcl ]; then \
+	  echo "Initializing with remote state (backend.hcl)..."; \
+	  terraform init -backend-config=backend.hcl; \
+	else \
+	  echo "No backend.hcl found — initializing with local state."; \
+	  echo "Copy backend.hcl.example to backend.hcl for GCS-backed remote state."; \
+	  terraform init; \
+	fi
+
+bootstrap-state:
+	@if [ -z "$$PROJECT_ID" ]; then echo "Set PROJECT_ID first: PROJECT_ID=my-project make bootstrap-state"; exit 1; fi
+	gsutil mb -p "$$PROJECT_ID" -l us-central1 -b on "gs://$$PROJECT_ID-tfstate-crdb"
+	gsutil versioning set on "gs://$$PROJECT_ID-tfstate-crdb"
+	@echo
+	@echo "Bucket created. Now copy backend.hcl.example -> backend.hcl,"
+	@echo "set bucket = \"$$PROJECT_ID-tfstate-crdb\", and run 'make init'."
 
 plan:
 	terraform plan

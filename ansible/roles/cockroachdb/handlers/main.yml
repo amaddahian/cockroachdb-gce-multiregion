@@ -1,5 +1,5 @@
 ---
-- name: restart cockroach
+- name: Restart cockroach
   ansible.builtin.systemd:
     name: "{{ crdb_service_name }}"
     state: restarted

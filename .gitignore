@@ -12,6 +12,10 @@ crash.*.log
 *.tfvars
 !terraform.tfvars.example
 
+# backend config: bucket name is project-specific
+backend.hcl
+!backend.hcl.example
+
 # generated TLS material — never commit
 ansible/certs/
 
