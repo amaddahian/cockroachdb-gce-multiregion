@@ -54,7 +54,7 @@ plan:
 	terraform plan
 
 apply:
-	terraform apply
+	terraform apply $(APPROVE)
 
 inventory:
 	bash $(RENDER)
@@ -65,7 +65,15 @@ provision: $(INVENTORY)
 provision-check: $(INVENTORY)
 	cd $(ANSIBLE_DIR) && ansible-playbook -i inventory/hosts.yml playbooks/site.yml --check --diff $(EXTRA)
 
-deploy: apply inventory provision
+# `make deploy` chains apply + inventory + provision in one shot. apply
+# auto-approves here because make is non-interactive — `terraform apply`
+# without flags would EOF on the y/n prompt and abort. For deliberate
+# step-by-step bring-up, use `make plan && make apply` (interactive) and
+# then `make inventory && make provision`.
+deploy:
+	$(MAKE) apply APPROVE=-auto-approve
+	$(MAKE) inventory
+	$(MAKE) provision
 
 destroy:
 	terraform destroy
