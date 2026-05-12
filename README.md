@@ -57,33 +57,15 @@ Two halves with a clean seam:
 - **Terraform** owns infra: VPC, subnets, firewalls, static IPs, data disks, VMs. That's it.
 - **Ansible** owns everything inside the VMs: storage formatting, CRDB install, TLS certs, systemd, cluster init, zone-config apply.
 
-```mermaid
-flowchart TD
-    classDef opt stroke-dasharray:5 5,fill:#fff8e1,color:#000
-    classDef store fill:#e8eaf6,stroke:#3949ab,color:#000
-    classDef cluster fill:#e1f5fe,stroke:#0277bd,color:#000
+![Deployment pipeline — infrastructure & configuration lifecycle](./Deployment-Pipeline.png)
 
-    OP([Operator])
-    MK[Makefile<br/>init · apply · inventory · provision · deploy · destroy]
+The five tiers above:
 
-    OP -->|"make deploy"| MK
-
-    MK -->|"1\. terraform apply"| TF[Terraform<br/>network · nodes · outputs<br/>+ dns.tf · lb.tf opt-in]
-    MK -->|"2\. ansible/inventory/render.sh"| BR[render.sh<br/>terraform output → YAML]
-    MK -->|"3\. ansible-playbook"| ANS[Ansible role: cockroachdb<br/>storage · install · certs ·<br/>service · init · zone_configs]
-
-    TF <-->|state| GCS[("GCS bucket<br/>versioned state<br/>+ rollback tags")]:::store
-
-    TF -->|creates| GCP[GCP infrastructure<br/>VPC · 3 subnets · 4 firewall rules<br/>5 × GCE n2-standard-4<br/>5 × pd-ssd · 10 static IPs<br/><i>opt:</i> Cloud DNS A records<br/><i>opt:</i> regional internal NLB]:::opt
-
-    TF -->|"outputs:<br/>nodes, ansible_group_vars,<br/>internal_lb_ip, dns_records"| BR
-    BR -->|"hosts.yml + group_vars/all.yml<br/>(crdb_topology, crdb_cache,<br/>crdb_lb_ip, crdb_dns_name)"| ANS
-
-    ANS -->|configures + bootstraps| CLUSTER[5-node multi-region CockroachDB<br/>2/2/1 voters · lease pref us-central<br/>TLS verify-full · chrony<br/>zone configs templated from topology]:::cluster
-    GCP -.provides VMs.-> CLUSTER
-
-    OP -.push or PR.-> CI[GitHub Actions CI<br/>terraform fmt + validate<br/>ansible-lint + syntax-check]
-```
+1. **Entry points & initiation** — `make deploy` is the single operator entry point; the Makefile fans out to terraform, render.sh, and ansible-playbook in sequence. Push or PR triggers GitHub Actions CI for static checks.
+2. **Provisioning & infrastructure** — Terraform creates the GCP infrastructure (VPC, subnets, firewall rules, 5 GCE VMs, pd-ssd disks, static IPs); state lives in a versioned GCS bucket. `dns.tf` and `lb.tf` add Cloud DNS records and a regional internal NLB when their gating variables are set.
+3. **Inventory rendering** — `ansible/inventory/render.sh` reads Terraform outputs and emits the Ansible inventory (`hosts.yml`) plus `group_vars/all.yml` (carrying `crdb_topology`, `crdb_cache`, `crdb_lb_ip`, `crdb_dns_name`).
+4. **Deployment & configuration** — the `cockroachdb` Ansible role runs storage → install → certs → service → init → zone_configs against the inventory.
+5. **Target cluster & persistent state** — a 5-node multi-region cluster with the topology-driven zone configs, TLS verify-full, and chrony for clock skew.
 
 Bring-up order:
 
