@@ -197,21 +197,38 @@ Prerequisites (all on the machine running `make deploy`):
 - An SSH keypair (defaults to `~/.ssh/id_ed25519` / `~/.ssh/id_ed25519.pub`)
 - **No `cockroach` CLI required** on the operator machine — Ansible runs cert generation and SQL on the first node.
 
-Run:
+Run, in order:
+
+**1. Variables.** Copy the example tfvars and edit it:
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars
-# edit terraform.tfvars: project_id, admin_cidrs (your /32 at minimum), ssh_pubkey_path
-
-# One-time: create a GCS bucket for remote Terraform state, then point at it.
-# Skip this and Terraform will fall back to local state — fine for demos,
-# risky for anything you'll come back to.
-PROJECT_ID=my-project make bootstrap-state
-cp backend.hcl.example backend.hcl   # edit: set bucket = "my-project-tfstate-crdb"
-
-make init
-make deploy   # = terraform apply + render inventory + ansible-playbook
 ```
+
+Open `terraform.tfvars` and set `project_id`, `admin_cidrs` (your `/32` at minimum), and `ssh_pubkey_path`.
+
+**2. Remote state (recommended).** Create a versioned GCS bucket for Terraform state and point Terraform at it. Skip this and Terraform falls back to local state — fine for demos, risky for anything you'll come back to.
+
+```bash
+PROJECT_ID=cockroach-ali make bootstrap-state
+cp backend.hcl.example backend.hcl
+```
+
+Open `backend.hcl` and replace `<your-project-id>` with your actual project ID. The result should look like:
+
+```hcl
+bucket = "cockroach-ali-tfstate-crdb"
+prefix = "crdb-cluster"
+```
+
+**3. Deploy.**
+
+```bash
+make init
+make deploy
+```
+
+`make deploy` runs `terraform apply`, renders the Ansible inventory, and runs the playbook — about 10 min on the default 5-node topology.
 
 What `make deploy` produces:
 
@@ -228,16 +245,20 @@ Useful outputs:
 terraform output node_external_ips
 terraform output node_internal_ips
 terraform output admin_ui_url
-terraform output -raw sql_connection_string_root   # marked sensitive
+terraform output -raw sql_connection_string_root
 ```
+
+(`sql_connection_string_root` is marked `sensitive`; that's why it needs `-raw`.)
 
 Re-running the playbook on its own:
 
 ```bash
-make provision               # full role
+make provision
 make provision EXTRA="--tags certs"
-make provision-check         # --check --diff dry-run
+make provision-check
 ```
+
+`make provision` runs the full role; `EXTRA` passes through to `ansible-playbook` (e.g., `--tags certs` re-runs only the cert tasks); `make provision-check` is a `--check --diff` dry-run.
 
 ## Verification
 
