@@ -199,19 +199,19 @@ Prerequisites (all on the machine running `make deploy`):
 
 Run, in order:
 
-**1. Variables.** Copy the example tfvars and edit it:
+**1. Variables.** Copy the example tfvars (only if it doesn't already exist — `-n` is no-clobber so re-running the quickstart won't wipe your customized file):
 
 ```bash
-cp terraform.tfvars.example terraform.tfvars
+cp -n terraform.tfvars.example terraform.tfvars
 ```
 
-Open `terraform.tfvars` and set `project_id`, `admin_cidrs` (your `/32` at minimum), and `ssh_pubkey_path`.
+Open `terraform.tfvars` and set `project_id`, `admin_cidrs` (your `/32` at minimum), and `ssh_pubkey_path` (the example default is `~/.ssh/id_ed25519.pub` — change this if your key is at a different path). The placeholders (`my-gcp-project-id`, `1.2.3.4/32`) will fail at plan time with confusing errors, so don't skip the edit.
 
 **2. Remote state (recommended).** Create a versioned GCS bucket for Terraform state and point Terraform at it. Skip this and Terraform falls back to local state — fine for demos, risky for anything you'll come back to.
 
 ```bash
 PROJECT_ID=cockroach-ali make bootstrap-state
-cp backend.hcl.example backend.hcl
+cp -n backend.hcl.example backend.hcl
 ```
 
 Open `backend.hcl` and replace `<your-project-id>` with your actual project ID. The result should look like:
