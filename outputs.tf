@@ -21,6 +21,17 @@ output "ansible_group_vars" {
     # When LB is enabled, every node cert needs the VIP as a SAN so clients
     # can connect to --host=<lb_ip> with sslmode=verify-full.
     crdb_lb_ip = var.create_internal_lb ? google_compute_forwarding_rule.sql[0].ip_address : ""
+    # Topology data consumed by sql/zone-configs.sql.j2 to render
+    # num_replicas / constraints / voter_constraints / lease_preferences.
+    # Sorted by topology key so lease_preferences order is deterministic
+    # (matches today's us-central > us-east-1 > us-east-2 priority).
+    crdb_num_replicas = sum([for k, v in var.topology : v.node_count])
+    crdb_topology = [
+      for k in sort(keys(var.topology)) : {
+        locality   = var.topology[k].locality_label
+        node_count = var.topology[k].node_count
+      }
+    ]
   }
 }
 

@@ -1,44 +1,53 @@
+{#- Multi-region zone configuration template.
+    Rendered by ansible/roles/cockroachdb/tasks/zone_configs.yml from these vars
+    (sourced from terraform output ansible_group_vars):
+      crdb_num_replicas       int   total replicas/voters across the cluster
+      crdb_topology           list  [{locality, node_count}, ...] in lease-preference order
+
+    With the default 5-node 2/2/1 topology this renders byte-identical to the
+    prior hand-maintained zone-configs.sql.
+-#}
 -- Multi-region zone configuration for the cluster.
--- Topology: 5 replicas, voters split 2/2/1 across us-central / us-east-1 / us-east-2.
--- Lease preference: us-central > us-east-1 > us-east-2.
+-- Topology: {{ crdb_num_replicas }} replicas, voters split {{ crdb_topology | map(attribute='node_count') | join('/') }} across {{ crdb_topology | map(attribute='locality') | join(' / ') }}.
+-- Lease preference: {{ crdb_topology | map(attribute='locality') | join(' > ') }}.
 
 ALTER DATABASE system CONFIGURE ZONE USING
     range_min_bytes = 134217728,
     range_max_bytes = 536870912,
     gc.ttlseconds = 90000,
-    num_replicas = 5,
-    num_voters = 5;
+    num_replicas = {{ crdb_num_replicas }},
+    num_voters = {{ crdb_num_replicas }};
 
 ALTER RANGE default CONFIGURE ZONE USING
     range_min_bytes = 134217728,
     range_max_bytes = 536870912,
     gc.ttlseconds = 14400,
-    num_replicas = 5,
-    num_voters = 5,
-    constraints = '{+region=us-central: 2, +region=us-east-1: 2, +region=us-east-2: 1}',
-    voter_constraints = '{+region=us-central: 2, +region=us-east-1: 2, +region=us-east-2: 1}',
-    lease_preferences = '[[+region=us-central], [+region=us-east-1], [+region=us-east-2]]';
+    num_replicas = {{ crdb_num_replicas }},
+    num_voters = {{ crdb_num_replicas }},
+    constraints = '{ {%- for r in crdb_topology -%}+region={{ r.locality }}: {{ r.node_count }}{%- if not loop.last %}, {% endif -%}{%- endfor -%} }',
+    voter_constraints = '{ {%- for r in crdb_topology -%}+region={{ r.locality }}: {{ r.node_count }}{%- if not loop.last %}, {% endif -%}{%- endfor -%} }',
+    lease_preferences = '[{%- for r in crdb_topology -%}[+region={{ r.locality }}]{%- if not loop.last %}, {% endif -%}{%- endfor -%}]';
 
 ALTER RANGE liveness CONFIGURE ZONE USING
     range_min_bytes = 134217728,
     range_max_bytes = 536870912,
     gc.ttlseconds = 600,
-    num_replicas = 5,
-    num_voters = 5;
+    num_replicas = {{ crdb_num_replicas }},
+    num_voters = {{ crdb_num_replicas }};
 
 ALTER RANGE meta CONFIGURE ZONE USING
     range_min_bytes = 134217728,
     range_max_bytes = 536870912,
     gc.ttlseconds = 3600,
-    num_replicas = 5,
-    num_voters = 5;
+    num_replicas = {{ crdb_num_replicas }},
+    num_voters = {{ crdb_num_replicas }};
 
 ALTER RANGE system CONFIGURE ZONE USING
     range_min_bytes = 134217728,
     range_max_bytes = 536870912,
     gc.ttlseconds = 90000,
-    num_replicas = 5,
-    num_voters = 5;
+    num_replicas = {{ crdb_num_replicas }},
+    num_voters = {{ crdb_num_replicas }};
 
 ALTER RANGE timeseries CONFIGURE ZONE USING
     gc.ttlseconds = 14400;
@@ -53,15 +62,15 @@ ALTER TABLE system.public.replication_constraint_stats CONFIGURE ZONE USING
     range_min_bytes = 134217728,
     range_max_bytes = 536870912,
     gc.ttlseconds = 600,
-    num_replicas = 5,
-    num_voters = 5;
+    num_replicas = {{ crdb_num_replicas }},
+    num_voters = {{ crdb_num_replicas }};
 
 ALTER TABLE system.public.replication_stats CONFIGURE ZONE USING
     range_min_bytes = 134217728,
     range_max_bytes = 536870912,
     gc.ttlseconds = 600,
-    num_replicas = 5,
-    num_voters = 5;
+    num_replicas = {{ crdb_num_replicas }},
+    num_voters = {{ crdb_num_replicas }};
 
 ALTER TABLE system.public.span_stats_tenant_boundaries CONFIGURE ZONE USING
     gc.ttlseconds = 3600;

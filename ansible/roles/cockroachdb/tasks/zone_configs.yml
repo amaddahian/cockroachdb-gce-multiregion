@@ -22,9 +22,9 @@
   delegate_to: "{{ groups['cockroachdb'][0] }}"
   run_once: true
 
-- name: Copy zone-configs.sql to first node
-  ansible.builtin.copy:
-    src: "{{ crdb_zone_configs_src }}"
+- name: Render zone-configs.sql from topology template on first node
+  ansible.builtin.template:
+    src: "{{ crdb_zone_configs_template }}"
     dest: "{{ crdb_zone_configs_dest }}"
     owner: "{{ crdb_user }}"
     group: "{{ crdb_group }}"

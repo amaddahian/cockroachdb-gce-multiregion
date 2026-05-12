@@ -179,6 +179,12 @@ Run:
 cp terraform.tfvars.example terraform.tfvars
 # edit terraform.tfvars: project_id, admin_cidrs (your /32 at minimum), ssh_pubkey_path
 
+# One-time: create a GCS bucket for remote Terraform state, then point at it.
+# Skip this and Terraform will fall back to local state — fine for demos,
+# risky for anything you'll come back to.
+PROJECT_ID=my-project make bootstrap-state
+cp backend.hcl.example backend.hcl   # edit: set bucket = "my-project-tfstate-crdb"
+
 make init
 make deploy   # = terraform apply + render inventory + ansible-playbook
 ```
@@ -283,7 +289,7 @@ topology = {
 }
 ```
 
-> **Heads up**: changing topology away from default also requires editing `sql/zone-configs.sql`. The default SQL hardcodes `+region=us-central`, `+region=us-east-1`, `+region=us-east-2` and `num_replicas=5` / `num_voters=5`. Templating the zone-config SQL is a follow-up.
+The zone-config SQL (`sql/zone-configs.sql.j2`) is a Jinja template — `num_replicas`, `num_voters`, `constraints`, `voter_constraints`, and `lease_preferences` are derived from `var.topology` at provision time. Changing the topology no longer requires hand-editing the SQL. Lease-preference order follows sorted topology keys (default: `us-central` > `us-east-1` > `us-east-2`); rename your localities if you want a different priority.
 
 ### DNS (opt-in)
 
@@ -323,9 +329,8 @@ What this repo intentionally does **not** do today:
 - No Prometheus / Datadog / metrics scraping
 - No tenant / serverless setup
 - No autoscaling
-- Zone-config SQL is not templated — custom topologies need a hand-edited `sql/zone-configs.sql`
 
-Reasonable next steps: an external NLB option, a `BACKUP INTO 'gs://...'` schedule (which would also need a dedicated VM service account with bucket write access), Prometheus node-exporter, and templating the zone-config SQL so non-default topologies don't need manual SQL edits.
+Reasonable next steps: an external NLB option, a `BACKUP INTO 'gs://...'` schedule (which would also need a dedicated VM service account with bucket write access), Prometheus node-exporter, and IAP-tunneled SSH instead of `admin_cidrs` source ranges.
 
 ## License & contributing
 

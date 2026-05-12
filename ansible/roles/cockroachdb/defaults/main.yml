@@ -51,8 +51,19 @@ crdb_ca_dir: "{{ playbook_dir }}/../certs"
 crdb_cache: ".25"
 crdb_max_sql_memory: ".25"
 
-# Zone-config SQL: copied to first node and applied after all nodes register.
-crdb_zone_configs_src: "{{ playbook_dir }}/../../sql/zone-configs.sql"
+# Zone-config SQL: rendered from sql/zone-configs.sql.j2 on the first node,
+# then applied after all nodes register. The template uses crdb_num_replicas
+# and crdb_topology (populated by Terraform via group_vars/all.yml).
+crdb_zone_configs_template: "{{ playbook_dir }}/../../sql/zone-configs.sql.j2"
 crdb_zone_configs_dest: "/var/lib/cockroach/zone-configs.sql"
 crdb_zone_configs_wait_retries: 60
 crdb_zone_configs_wait_delay: 2
+
+# Defaults for topology vars when running the playbook against an inventory
+# whose group_vars/all.yml doesn't carry them (e.g., test runs, --check).
+# In normal use these come from terraform output ansible_group_vars.
+crdb_num_replicas: 5
+crdb_topology:
+  - { locality: "us-central", node_count: 2 }
+  - { locality: "us-east-1", node_count: 2 }
+  - { locality: "us-east-2", node_count: 1 }

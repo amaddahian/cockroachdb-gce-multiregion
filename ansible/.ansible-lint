@@ -1,0 +1,19 @@
+---
+# ansible-lint configuration.
+#
+# Skipped rules below are deliberate exceptions, not blanket suppression.
+# If you find yourself adding a new rule here, prefer fixing the offending
+# task instead — exceptions accumulate quietly and make the linter less
+# useful over time.
+
+skip_list:
+  # Role variables use the `crdb_` prefix instead of the role name
+  # (`cockroachdb_`). This matches the upstream CockroachDB CLI convention,
+  # is documented as the project's chosen style in defaults/main.yml, and
+  # would touch ~30 files to "fix". The lint warning is informational only.
+  - var-naming[no-role-prefix]
+
+  # The `run-once[task]` rule warns that run_once behaves differently under
+  # `strategy: free`. We use the default linear strategy throughout — the
+  # warning doesn't apply.
+  - run-once[task]

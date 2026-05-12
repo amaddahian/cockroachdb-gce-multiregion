@@ -18,6 +18,7 @@
   ansible.builtin.command:
     cmd: "mkfs.ext4 -F -E lazy_itable_init=0,lazy_journal_init=0,discard {{ crdb_data_device }}"
   when: blkid_result.rc != 0
+  changed_when: true  # When this runs (only when blkid reports no FS), it always changes things.
 
 - name: Create data directory
   ansible.builtin.file:

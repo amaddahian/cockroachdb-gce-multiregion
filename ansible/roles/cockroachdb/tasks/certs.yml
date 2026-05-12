@@ -96,7 +96,7 @@
     owner: "{{ crdb_user }}"
     group: "{{ crdb_group }}"
     mode: "0644"
-  notify: restart cockroach
+  notify: Restart cockroach
 
 - name: Push CA key to nodes that still need to sign their per-node cert
   ansible.builtin.copy:
@@ -124,7 +124,7 @@
       --ca-key={{ crdb_certs_dir }}/ca.key
     creates: "{{ crdb_certs_dir }}/node.crt"
   when: not existing_node_cert.stat.exists
-  notify: restart cockroach
+  notify: Restart cockroach
 
 - name: Set ownership on per-node cert files
   ansible.builtin.file:
