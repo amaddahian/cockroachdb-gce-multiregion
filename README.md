@@ -20,22 +20,6 @@ We want survivability across three geographic regions: Chicago-ish, Ashburn, and
 
 ![CockroachDB multi-region topology on GCE](./CRDB-Diagram.png)
 
-```
-                 ┌─────────────────── VPC (global) ──────────────────┐
-                 │                                                    │
-   us-central1   │  [n1: zone-a]   [n2: zone-b]                       │
-   (us-central)  │       \\           //                               │
-                 │        \\         //                                │
-   us-east4      │  [n3: zone-a]   [n4: zone-b]                       │
-   (us-east-1)   │              \\ //                                  │
-                 │               X                                    │
-   us-east5      │           [n5: zone-a]                             │
-   (us-east-2)   │                                                    │
-                 └────────────────────────────────────────────────────┘
-
-   5 replicas total. Voters: 2/2/1. Lease preference: us-central > us-east-1 > us-east-2.
-```
-
 Note: the CRDB `--locality` labels (`us-central`, `us-east-1`, `us-east-2`) are deliberately distinct from the GCP region names. The zone configs key on the CRDB labels, and we wire those labels at `cockroach start` time via `--locality=cloud=gce,region=<label>,zone=<gce-zone>`.
 
 ## Design decisions and the trade-offs behind them
