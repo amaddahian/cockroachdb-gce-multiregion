@@ -407,6 +407,43 @@ cockroach sql \
 
 The `cockroach` CLI on your laptop is **optional** — the role bakes the binary into every node, so `ssh crdb@$N1 'sudo -u cockroach /usr/local/bin/cockroach sql --certs-dir=/var/lib/cockroach/certs --host=localhost'` always works.
 
+### What's reachable from where (and what "internal" means)
+
+<details>
+<summary><strong>Click to expand</strong> — connectivity matrix, why the internal LB isn't reachable from your laptop, and how to get a single VIP from anywhere</summary>
+
+<br>
+
+**"Internal" in GCP terminology means VPC-internal**, not "between cluster nodes." The opt-in internal NLB (`var.create_internal_lb`) creates a VIP at a private RFC1918 address (e.g., `10.10.0.4`) that is only reachable from:
+
+1. **Other VMs inside the same VPC** — a CRDB node, a worker VM you spin up, a bastion. This is the canonical case: apps deployed alongside the cluster connect to the LB instead of pinning to a single node IP.
+2. **Networks peered into the VPC** via Cloud VPN, Cloud Interconnect, or VPC peering. If you set up a VPN tunnel from your home/office router to the VPC, your laptop becomes "in" the VPC and gets a route to `10.x.x.x`.
+3. **Private Service Connect** and similar Google-managed private endpoints.
+
+Your laptop on home/office WiFi cannot reach `10.10.0.4` directly — there is no route from the public internet into RFC1918 space inside a VPC.
+
+**Reachability matrix (from your laptop, default deploy):**
+
+| Endpoint | Reachable? | Why |
+|---|---|---|
+| `34.x.x.x:26257` (per-node external IP, SQL) | ✅ Yes | Public IP; firewall opens 26257 to your `admin_cidrs` (`allow-sql-external` rule) |
+| `34.x.x.x:8080` (per-node external IP, admin UI) | ✅ Yes | Public IP; `allow-admin-ui` opens 8080 to your `admin_cidrs` |
+| `10.x.x.x:26257` (node internal IP) | ❌ No | Private IP, no route from public internet |
+| `10.x.x.x:26257` (internal NLB VIP, if enabled) | ❌ No | Same — private IP |
+
+**If you want a single VIP from anywhere (not per-node), pick one:**
+
+| Option | What it gives you | Cost / complexity |
+|---|---|---|
+| **External NLB** (not yet built — see Roadmap) | A public VIP on `34.x.x.x:26257` you can hit from your laptop, fronting all 5 nodes | ~$0.025/hr + a public IP. Adds public attack surface; restrict via firewall to `admin_cidrs`. |
+| **Bastion VM in the VPC + SSH tunnel** | `ssh -L 26257:10.10.0.4:26257 bastion`, then connect locally to `localhost:26257` | One small VM (~$0.02/hr) + SSH plumbing. No new public surface. |
+| **Cloud VPN to your home network** | Laptop becomes "in" the VPC; can reach `10.10.0.4` natively | Most setup, most realistic for ongoing use; on-prem-equivalent posture |
+| **Status quo: per-node external IPs** | Laptop connects directly to `34.x.x.x:26257` per node | Free; what you have today. Drawback: you pin to a specific node, no LB-style failover |
+
+The **internal NLB is still useful even when your laptop can't reach it** — it's the right answer for app servers / workers running inside the same GCP project. Your laptop typically isn't the SQL-traffic hot path; it's just the operator surface, and per-node external IPs handle that fine.
+
+</details>
+
 ### Re-run only part of the playbook
 
 ```bash
