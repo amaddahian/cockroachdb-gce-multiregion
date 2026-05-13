@@ -197,7 +197,21 @@ Prerequisites (all on the machine running `make deploy`):
 - An SSH keypair (defaults to `~/.ssh/id_ed25519` / `~/.ssh/id_ed25519.pub`)
 - **No `cockroach` CLI required** on the operator machine — Ansible runs cert generation and SQL on the first node.
 
-Run, in order:
+### Single-command deploy (recommended)
+
+`scripts/quickstart.sh` wraps the full bring-up in one command, with pre-flight checks (terraform/ansible/jq/gcloud installed, ADC ready, SSH key present), auto-detection of your external IP for `admin_cidrs`, idempotent state-bucket bootstrap, and end-to-end verify:
+
+```bash
+PROJECT_ID=my-project ./scripts/quickstart.sh             # deploy + verify
+PROJECT_ID=my-project ./scripts/quickstart.sh destroy     # tear down
+PROJECT_ID=my-project ./scripts/quickstart.sh redeploy    # destroy + deploy
+```
+
+Optional env overrides: `SSH_KEY_PATH` (default auto-detects `~/.ssh/id_*.pub`), `ADMIN_CIDRS` (comma-separated, default auto-detects via `checkip.amazonaws.com`), `STATE_LOCATION` (default `us-central1`).
+
+### Step by step (manual flow)
+
+If you want to walk through it manually, in order:
 
 **1. Variables.** Copy the example tfvars (only if it doesn't already exist — `-n` is no-clobber so re-running the quickstart won't wipe your customized file):
 
