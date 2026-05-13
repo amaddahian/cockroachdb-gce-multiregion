@@ -189,6 +189,11 @@ Optional env overrides: `SSH_KEY_PATH` (default auto-detects `~/.ssh/id_*.pub`),
 
 ### Step by step (manual flow)
 
+<details>
+<summary><strong>Click to expand the manual walkthrough</strong> (skip if you used the quickstart script above)</summary>
+
+<br>
+
 If you want to walk through it manually, in order:
 
 **1. Variables.** Copy the example tfvars (only if it doesn't already exist — `-n` is no-clobber so re-running the quickstart won't wipe your customized file):
@@ -241,6 +246,8 @@ terraform output -raw sql_connection_string_root
 ```
 
 (`sql_connection_string_root` is marked `sensitive`; that's why it needs `-raw`.)
+
+</details>
 
 ### DB Console credentials
 
