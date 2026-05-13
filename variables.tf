@@ -182,3 +182,19 @@ variable "internal_lb_subnetwork" {
   type        = string
   default     = ""
 }
+
+# -----------------------------------------------------------------------------
+# External regional load balancer (opt-in)
+# -----------------------------------------------------------------------------
+
+variable "create_external_lb" {
+  description = "Create a regional EXTERNAL (internet-facing) Network Load Balancer fronting both the SQL port (26257) and the admin UI (8080). Public VIP. Source-restricted to var.admin_cidrs at the firewall (the existing allow-sql-external + allow-admin-ui rules cover client traffic via the LB; an additional rule allows GCP health-check probers)."
+  type        = bool
+  default     = false
+}
+
+variable "external_lb_region" {
+  description = "Region for the external LB. Backends are all nodes in that region. Must be one of var.topology[*].region when create_external_lb=true."
+  type        = string
+  default     = ""
+}

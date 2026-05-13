@@ -118,6 +118,7 @@
       {{ inventory_hostname }}
       {% if crdb_dns_name | length > 0 %}{{ crdb_dns_name }}{% endif %}
       {% if crdb_lb_ip | length > 0 %}{{ crdb_lb_ip }}{% endif %}
+      {% if crdb_external_lb_ip | length > 0 %}{{ crdb_external_lb_ip }}{% endif %}
       localhost
       127.0.0.1
       --certs-dir={{ crdb_certs_dir }}

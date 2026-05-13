@@ -385,7 +385,37 @@ internal_lb_region = "us-central1"   # must be one of var.topology[*].region
 cockroach sql --certs-dir=/var/lib/cockroach/certs --host=<LB_IP>:26257 -e 'SELECT 1'
 ```
 
-External LB and a load-balancer-aware DNS record are not in scope today.
+### External (public) load balancer (opt-in)
+
+A regional **external** Network Load Balancer with a public IP, fronting **both** the SQL port (26257) and the admin UI (8080). Use this when you want a single public VIP reachable from your laptop or any client outside the VPC, instead of pinning to per-node IPs.
+
+```hcl
+create_external_lb = true
+external_lb_region = "us-central1"   # must be one of var.topology[*].region
+```
+
+`terraform output external_lb_ip` exposes the public VIP.
+
+Specifics:
+
+- **Same VIP for SQL and admin UI**: one forwarding rule listens on 26257 + 8080. GCP NLBs don't translate ports — backends receive traffic on the original port.
+- **TCP health check** on 26257 only. We don't run an HTTPS health check on 8080 because GCP's HTTPS probers don't trust unknown CAs (and ours is self-signed). TCP-on-SQL is sufficient: if CRDB's SQL listener is alive, the admin UI is too.
+- **Source restriction**: the existing `allow-sql-external` + `allow-admin-ui` firewall rules already gate 26257/8080 to `var.admin_cidrs` at the instance level. GCP NLBs are pass-through (no source NAT), so backends see the real client IP and that restriction works through the LB. An additional firewall rule allows GCP health-check probers from `35.191.0.0/16` and `130.211.0.0/22`.
+- **Cert SANs**: the public LB IP is automatically added to every node's TLS cert SAN list, so `sslmode=verify-full` works against the LB VIP from your laptop.
+- **Per-node external IPs are NOT removed** when the external LB is enabled — total public surface = 5 per-node IPs + 1 LB VIP. To minimize public surface, manually drop the `allow-sql-external` and `allow-admin-ui` firewall rules in `network.tf` after the LB is up; the LB still works because its source-IP restriction comes from those rules being present at the instance level. Without them, you'd need to add equivalent rules scoped to LB-only access.
+
+Security trade-off vs internal LB:
+
+| Aspect | Internal LB | External LB |
+|---|---|---|
+| LB VIP | Private RFC1918 (e.g., `10.10.0.4`) | Public (e.g., `34.x.x.x`) |
+| Reachable from your laptop | No (without VPN/peering) | Yes (subject to `admin_cidrs`) |
+| Reachable from in-VPC clients | Yes | Yes |
+| Net new public attack surface | None | The LB's public IP |
+| TLS termination | At nodes (LB is L4 pass-through) | At nodes (LB is L4 pass-through) |
+| Auth posture | Same (TLS verify-full + client cert / SQL password) | Same |
+
+Both can be enabled simultaneously — they're independent resources.
 
 ## Operations
 
@@ -435,7 +465,7 @@ Your laptop on home/office WiFi cannot reach `10.10.0.4` directly — there is n
 
 | Option | What it gives you | Cost / complexity |
 |---|---|---|
-| **External NLB** (not yet built — see Roadmap) | A public VIP on `34.x.x.x:26257` you can hit from your laptop, fronting all 5 nodes | ~$0.025/hr + a public IP. Adds public attack surface; restrict via firewall to `admin_cidrs`. |
+| **External NLB** (`var.create_external_lb`) | A public VIP on `34.x.x.x:26257` and `:8080` you can hit from your laptop, fronting all 5 nodes | ~$0.025/hr + a public IP. Adds public attack surface; restricted via firewall to `admin_cidrs`. See Configuration → "External (public) load balancer (opt-in)". |
 | **Bastion VM in the VPC + SSH tunnel** | `ssh -L 26257:10.10.0.4:26257 bastion`, then connect locally to `localhost:26257` | One small VM (~$0.02/hr) + SSH plumbing. No new public surface. |
 | **Cloud VPN to your home network** | Laptop becomes "in" the VPC; can reach `10.10.0.4` natively | Most setup, most realistic for ongoing use; on-prem-equivalent posture |
 | **Status quo: per-node external IPs** | Laptop connects directly to `34.x.x.x:26257` per node | Free; what you have today. Drawback: you pin to a specific node, no LB-style failover |
@@ -597,13 +627,12 @@ Symptom: `terraform apply` errors with `no file exists at "/Users/.../.ssh/id_ed
 
 What this repo intentionally does **not** do today:
 
-- No external load balancer (opt-in internal LB exists)
 - No backup schedule or `BACKUP` configuration (operator-driven for now)
 - No Prometheus / Datadog / metrics scraping
 - No tenant / serverless setup
 - No autoscaling
 
-Reasonable next steps: an external NLB option, a `BACKUP INTO 'gs://...'` schedule (which would also need a dedicated VM service account with bucket write access), Prometheus node-exporter, and IAP-tunneled SSH instead of `admin_cidrs` source ranges.
+Reasonable next steps: a `BACKUP INTO 'gs://...'` schedule (which would also need a dedicated VM service account with bucket write access), Prometheus node-exporter, IAP-tunneled SSH instead of `admin_cidrs` source ranges, and Cloud Armor in front of the external LB for L7 protection.
 
 ## License & contributing
 

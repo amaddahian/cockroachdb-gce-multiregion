@@ -19,8 +19,10 @@ output "ansible_group_vars" {
     crdb_cache          = var.crdb_cache
     crdb_max_sql_memory = var.crdb_max_sql_memory
     # When LB is enabled, every node cert needs the VIP as a SAN so clients
-    # can connect to --host=<lb_ip> with sslmode=verify-full.
-    crdb_lb_ip = var.create_internal_lb ? google_compute_forwarding_rule.sql[0].ip_address : ""
+    # can connect to --host=<lb_ip> with sslmode=verify-full. Same logic
+    # applies to the external LB (public VIP) when that's enabled.
+    crdb_lb_ip          = var.create_internal_lb ? google_compute_forwarding_rule.sql[0].ip_address : ""
+    crdb_external_lb_ip = var.create_external_lb ? google_compute_forwarding_rule.ext[0].ip_address : ""
     # Topology data consumed by sql/zone-configs.sql.j2 to render
     # num_replicas / constraints / voter_constraints / lease_preferences.
     # Sorted by topology key so lease_preferences order is deterministic
@@ -53,6 +55,11 @@ output "dns_records" {
 output "internal_lb_ip" {
   description = "Internal load balancer IP (empty string when create_internal_lb=false)."
   value       = var.create_internal_lb ? google_compute_forwarding_rule.sql[0].ip_address : ""
+}
+
+output "external_lb_ip" {
+  description = "External (public) load balancer IP (empty string when create_external_lb=false). Listens on both 26257 (SQL) and 8080 (admin UI)."
+  value       = var.create_external_lb ? google_compute_forwarding_rule.ext[0].ip_address : ""
 }
 
 output "ssh_user" {

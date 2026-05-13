@@ -69,10 +69,25 @@ data_disk_size_gb = 250
 # --- Optional: Internal regional load balancer ---
 # Creates a regional internal TCP NLB in front of port 26257 with backends
 # being all nodes in internal_lb_region. internal_lb_region must match one
-# of the regions in var.topology.
+# of the regions in var.topology. Internal = VPC-internal RFC1918 IP, only
+# reachable from inside the VPC (or via VPN/peering).
 #
 # create_internal_lb = true
 # internal_lb_region = "us-central1"
+
+# --- Optional: External (public) regional load balancer ---
+# Creates a regional EXTERNAL Network Load Balancer with a public IP, fronting
+# both the SQL port (26257) and the admin UI (8080). Source-restricted to
+# admin_cidrs at the firewall (existing allow-sql-external + allow-admin-ui
+# rules). LB VIP is automatically added to every node cert's SANs so
+# sslmode=verify-full works against it. Backends are all nodes in
+# external_lb_region.
+#
+# Use this when you want a single public VIP reachable from your laptop or
+# any other client outside the VPC, instead of pinning to per-node IPs.
+#
+# create_external_lb = true
+# external_lb_region = "us-central1"
 
 # --- Optional: DB Console admin user ---
 # By default the deploy creates a SQL user "consoleadmin" with a 24-char

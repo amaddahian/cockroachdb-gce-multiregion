@@ -42,6 +42,10 @@ crdb_dns_name: ""
 # can connect to --host=<lb_ip> with sslmode=verify-full.
 crdb_lb_ip: ""
 
+# Cluster-wide external (public) LB IP, populated when var.create_external_lb
+# is true. Added to every node cert's SANs for the same reason.
+crdb_external_lb_ip: ""
+
 # DB Console admin user. crdb_admin_user="" disables admin user creation.
 # crdb_admin_password="" triggers auto-generation; the resolved value is
 # cached at crdb_admin_password_file on the controller for retrieval and
