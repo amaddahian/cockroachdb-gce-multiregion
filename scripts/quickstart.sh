@@ -80,17 +80,22 @@ EOF
     Set SSH_KEY_PATH or generate one:  ssh-keygen -t ed25519"
   ok "SSH public key: $SSH_KEY_PATH"
 
-  # Admin CIDRs — autodetect this host's external IP if not provided
-  if [[ -z "${ADMIN_CIDRS:-}" ]]; then
-    local ip
-    ip="$(curl -fsS --max-time 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]' || true)"
-    [[ -n "$ip" ]] || die "couldn't auto-detect external IP via checkip.amazonaws.com.
-    Set ADMIN_CIDRS=\"a.b.c.d/32\" explicitly."
-    ADMIN_CIDRS="$ip/32"
-    ok "auto-detected external IP: $ADMIN_CIDRS"
+  # Always detect this host's current external IP — we use it both to seed
+  # admin_cidrs on a fresh tfvars and to verify-and-fix coverage on an
+  # existing tfvars (see ensure_egress_covered below).
+  CURRENT_EGRESS_IP="$(curl -fsS --max-time 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -n "$CURRENT_EGRESS_IP" ]]; then
+    ok "current egress IP: $CURRENT_EGRESS_IP"
   else
-    ok "admin CIDRs: $ADMIN_CIDRS"
+    warn "couldn't auto-detect external IP via checkip.amazonaws.com — egress check will be skipped"
   fi
+
+  # Admin CIDRs for the case when terraform.tfvars doesn't yet exist.
+  if [[ -z "${ADMIN_CIDRS:-}" ]]; then
+    [[ -n "$CURRENT_EGRESS_IP" ]] || die "couldn't auto-detect external IP. Set ADMIN_CIDRS=\"a.b.c.d/32\" explicitly."
+    ADMIN_CIDRS="$CURRENT_EGRESS_IP/32"
+  fi
+  ok "admin CIDRs (used if creating new tfvars): $ADMIN_CIDRS"
 
   # Render ADMIN_CIDRS as a quoted, comma-separated HCL list
   ADMIN_CIDRS_HCL=$(echo "$ADMIN_CIDRS" | tr ',' '\n' | awk 'NF{printf "\"%s\", ", $0}' | sed 's/, $//')
@@ -150,6 +155,43 @@ data_disk_size_gb = 250
 EOF
     ok "wrote terraform.tfvars"
   fi
+
+  ensure_egress_covered
+}
+
+# Verify that this host's current egress IP is covered by at least one CIDR
+# in admin_cidrs. If not, prepend <ip>/32 (preserves existing entries so
+# other networks keep working). This is the recurring footgun: every
+# laptop-network change (VPN, WiFi, ISP rotation) silently breaks SSH.
+ensure_egress_covered() {
+  [[ -n "${CURRENT_EGRESS_IP:-}" ]] || { warn "skipping egress check (no current IP)"; return 0; }
+
+  local cidrs
+  cidrs=$(awk -F'[][]' '/^[[:space:]]*admin_cidrs/{print $2}' terraform.tfvars \
+            | tr -d ' "' | tr ',' '\n' | grep -v '^$' || true)
+  if [[ -z "$cidrs" ]]; then
+    warn "no admin_cidrs found in terraform.tfvars — skipping egress check"
+    return 0
+  fi
+
+  if echo "$cidrs" | python3 -c "
+import ipaddress, sys
+ip = ipaddress.ip_address('$CURRENT_EGRESS_IP')
+covered = any(ip in ipaddress.ip_network(c.strip()) for c in sys.stdin if c.strip())
+sys.exit(0 if covered else 1)
+"; then
+    ok "egress IP $CURRENT_EGRESS_IP is covered by admin_cidrs"
+    return 0
+  fi
+
+  warn "egress IP $CURRENT_EGRESS_IP is NOT covered by admin_cidrs in terraform.tfvars"
+  warn "current admin_cidrs: $(echo "$cidrs" | tr '\n' ' ')"
+  warn "prepending $CURRENT_EGRESS_IP/32 (backup at terraform.tfvars.bak)"
+  cp terraform.tfvars terraform.tfvars.bak
+  sed -i.tmp "s|admin_cidrs = \[|admin_cidrs = [\"$CURRENT_EGRESS_IP/32\", |" terraform.tfvars
+  rm -f terraform.tfvars.tmp
+  ok "$(grep '^admin_cidrs' terraform.tfvars)"
+  ok "terraform apply will update the firewall rules to allow this IP (~30s of churn)"
 }
 
 # --- terraform init + make deploy ---
