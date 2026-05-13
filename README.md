@@ -266,7 +266,7 @@ terraform output -raw sql_connection_string_root
 
 ### DB Console credentials
 
-The Ansible role auto-creates a SQL user (default `admin`) for the web UI on first deploy. The 24-char password is generated on the controller and stashed at `ansible/certs/admin_password.txt` (gitignored, mode 0600). The quickstart script prints the credentials at the end of `verify`. To read them later:
+The Ansible role auto-creates a SQL user (default `consoleadmin`) for the web UI on first deploy. (Default isn't `admin` because `admin` is a built-in CRDB role whose password is not editable — CRDB rejects `ALTER USER admin WITH PASSWORD ...` with `cannot edit admin role`. Same for `root`.) The 24-char password is generated on the controller and stashed at `ansible/certs/admin_password.txt` (gitignored, mode 0600). The quickstart script prints the credentials at the end of `verify`. To read them later:
 
 ```bash
 cat ansible/certs/admin_password.txt

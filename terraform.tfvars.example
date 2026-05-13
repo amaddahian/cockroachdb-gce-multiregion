@@ -75,11 +75,13 @@ data_disk_size_gb = 250
 # internal_lb_region = "us-central1"
 
 # --- Optional: DB Console admin user ---
-# By default the deploy creates a SQL user "admin" with a 24-char random
-# password stashed at ansible/certs/admin_password.txt (mode 0600). The
-# quickstart script prints the credentials at the end of `verify`. Use
-# `make rotate-admin-password` to regenerate.
+# By default the deploy creates a SQL user "consoleadmin" with a 24-char
+# random password stashed at ansible/certs/admin_password.txt (mode 0600).
+# The quickstart script prints the credentials at the end of `verify`.
+# Use `make rotate-admin-password` to regenerate.
 #
-# Override these only if you want a different username or your own password.
+# crdb_admin_user must NOT be "admin" or "root" — both are built-in CRDB
+# roles whose passwords are not editable. Validation will reject those.
+#
 # crdb_admin_user     = "alice"
 # crdb_admin_password = "use-a-real-password-not-this-one"

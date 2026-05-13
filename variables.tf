@@ -122,9 +122,14 @@ variable "crdb_max_sql_memory" {
 # -----------------------------------------------------------------------------
 
 variable "crdb_admin_user" {
-  description = "Username to create for DB Console (web UI) login. Set to \"\" to skip user creation entirely (DB Console will reject all logins)."
+  description = "Username to create for DB Console (web UI) login. Set to \"\" to skip user creation entirely (DB Console will reject all logins). NOTE: cannot be \"admin\" or \"root\" — both are built-in role names whose passwords are not editable."
   type        = string
-  default     = "admin"
+  default     = "consoleadmin"
+
+  validation {
+    condition     = !contains(["admin", "root"], lower(var.crdb_admin_user))
+    error_message = "crdb_admin_user cannot be 'admin' or 'root' — those are built-in CRDB roles whose passwords are not editable. Try 'consoleadmin', 'dbadmin', or your own name."
+  }
 }
 
 variable "crdb_admin_password" {

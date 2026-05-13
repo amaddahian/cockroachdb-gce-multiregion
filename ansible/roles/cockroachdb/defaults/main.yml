@@ -46,7 +46,11 @@ crdb_lb_ip: ""
 # crdb_admin_password="" triggers auto-generation; the resolved value is
 # cached at crdb_admin_password_file on the controller for retrieval and
 # for idempotency across re-runs.
-crdb_admin_user: "admin"
+# NOTE: crdb_admin_user cannot be "admin" or "root" — both are built-in
+# CRDB roles whose passwords are not editable (CREATE works, but ALTER USER
+# WITH PASSWORD fails with "cannot edit admin role"). Default is
+# "consoleadmin" to avoid that collision.
+crdb_admin_user: "consoleadmin"
 crdb_admin_password: ""
 crdb_admin_password_file: "{{ playbook_dir }}/../certs/admin_password.txt"
 
