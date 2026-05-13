@@ -8,6 +8,20 @@ If you go looking for "Terraform for self-hosted CockroachDB on GCE," you will n
 
 So if you want a self-hosted CRDB cluster on GCE, multi-region, secure-by-default, with declarative zone configs applied at apply-time — you build it. This repo is that build.
 
+### When to use this — and when not to
+
+**Good fit:**
+- **Learning multi-region CRDB.** The voter constraints, lease preferences, and locality wiring are explicit and inspectable. Stand it up, break it, see what happens.
+- **Reference / blueprint for self-hosted deployments.** Fork it, adjust topology, move it to your own project.
+- **Dev or research clusters that need real failure-domain spread.** A 5-node cluster across 3 GCP regions costs ~$1.50/hr; cheap enough to spin up and tear down per experiment.
+- **A starting point for a more opinionated platform** (your own load balancer story, your own backup story, your own observability stack — see Roadmap below).
+
+**Probably not a fit:**
+- **A production OLTP cluster you'll depend on.** No backup automation, no monitoring stack, no alerting, no on-call playbook, no automated recovery, no formal multi-tenant or RBAC strategy. Add those — or use [CockroachDB Cloud](https://cockroachlabs.cloud/) for managed.
+- **Cloud-native deployments on Kubernetes.** The CRDB Operator (`cockroach-operator`) is the right tool for K8s; this project is for IaaS.
+- **Single-region clusters.** You can shrink `var.topology` to one region, but most of the value of this scaffold (multi-region zone configs, locality plumbing) becomes dead weight.
+- **Highly regulated / locked-down environments.** No IAP/OS Login by default, no HSM-backed CA, no Vault integration. Treat the trust model as "operator's laptop is trusted" — fine for research, not for compliance-bound workloads.
+
 ## The target topology
 
 We want survivability across three geographic regions: Chicago-ish, Ashburn, and Ohio. GCP's nearest mappings are `us-central1` (Iowa), `us-east4` (Ashburn VA), and `us-east5` (Columbus OH). Five nodes, distributed 2/2/1, exactly matching the voter constraints in the zone config.
@@ -130,60 +144,24 @@ terraform-crdb-gcp/
 
 ## The zone configs
 
-The whole reason this repo is shaped the way it is. After init, we apply the following SQL — these are the configs that produce the 2/2/1 voter layout with `us-central` holding the lease preference:
+The whole reason this repo is shaped the way it is. After init, the role applies multi-region zone configs to make the 2/2/1 voter layout real. The SQL is **templated from `var.topology`** at provision time (`sql/zone-configs.sql.j2`), so the constraint counts, lease preferences, and replica counts always match the live cluster shape.
+
+For the default 5-node 2/2/1 topology, the rendered SQL contains lines like:
 
 ```sql
-ALTER DATABASE system CONFIGURE ZONE USING
-    range_min_bytes = 134217728,
-    range_max_bytes = 536870912,
-    gc.ttlseconds = 90000,
-    num_replicas = 5,
-    num_voters = 5;
-
 ALTER RANGE default CONFIGURE ZONE USING
-    range_min_bytes = 134217728,
-    range_max_bytes = 536870912,
-    gc.ttlseconds = 14400,
     num_replicas = 5,
     num_voters = 5,
     constraints = '{+region=us-central: 2, +region=us-east-1: 2, +region=us-east-2: 1}',
     voter_constraints = '{+region=us-central: 2, +region=us-east-1: 2, +region=us-east-2: 1}',
     lease_preferences = '[[+region=us-central], [+region=us-east-1], [+region=us-east-2]]';
-
-ALTER RANGE liveness CONFIGURE ZONE USING
-    range_min_bytes = 134217728, range_max_bytes = 536870912,
-    gc.ttlseconds = 600, num_replicas = 5, num_voters = 5;
-
-ALTER RANGE meta CONFIGURE ZONE USING
-    range_min_bytes = 134217728, range_max_bytes = 536870912,
-    gc.ttlseconds = 3600, num_replicas = 5, num_voters = 5;
-
-ALTER RANGE system CONFIGURE ZONE USING
-    range_min_bytes = 134217728, range_max_bytes = 536870912,
-    gc.ttlseconds = 90000, num_replicas = 5, num_voters = 5;
-
-ALTER RANGE timeseries CONFIGURE ZONE USING gc.ttlseconds = 14400;
-
--- TODO: the original ALTER TABLE statement here had its identifier rewritten
--- by an Antigena URL proxy. Replace with the real table name before applying.
--- ALTER TABLE <real.table.name> CONFIGURE ZONE USING gc.ttlseconds = 3600;
-
-ALTER TABLE system.public.replication_constraint_stats CONFIGURE ZONE USING
-    range_min_bytes = 134217728, range_max_bytes = 536870912,
-    gc.ttlseconds = 600, num_replicas = 5, num_voters = 5;
-
-ALTER TABLE system.public.replication_stats CONFIGURE ZONE USING
-    range_min_bytes = 134217728, range_max_bytes = 536870912,
-    gc.ttlseconds = 600, num_replicas = 5, num_voters = 5;
-
-ALTER TABLE system.public.span_stats_tenant_boundaries CONFIGURE ZONE USING gc.ttlseconds = 3600;
-ALTER TABLE system.public.statement_activity         CONFIGURE ZONE USING gc.ttlseconds = 3600;
-ALTER TABLE system.public.statement_statistics       CONFIGURE ZONE USING gc.ttlseconds = 3600;
-ALTER TABLE system.public.transaction_activity       CONFIGURE ZONE USING gc.ttlseconds = 3600;
-ALTER TABLE system.public.transaction_statistics     CONFIGURE ZONE USING gc.ttlseconds = 3600;
 ```
 
-> One of the `ALTER TABLE` statements in the source had its identifier replaced by a security-proxy rewriting URL (`https://us01.l.antigena.com/...`). It is left commented out with a TODO — restore the real table name before running for real.
+For a 9-node 3/3/3 topology, the same template renders `num_replicas = 9`, `+region=us-central: 3`, etc. — all derived from `var.topology` automatically. See `sql/zone-configs.sql.j2` for the full template (including `gc.ttlseconds` tuning per range, system-table-specific zone configs, etc.).
+
+Lease-preference order follows sorted topology keys. Default keys (`us-central`, `us-east-1`, `us-east-2`) sort alphabetically into the priority you'd want; rename keys if you want a different order.
+
+> The template still has one commented-out `ALTER TABLE` line for a system table whose identifier was URL-rewritten by an Antigena security proxy in the original source. It's left as a TODO — restore the real table name before applying for real if you need that table's TTL configured.
 
 ## Quickstart
 
@@ -401,6 +379,175 @@ cockroach sql --certs-dir=/var/lib/cockroach/certs --host=<LB_IP>:26257 -e 'SELE
 ```
 
 External LB and a load-balancer-aware DNS record are not in scope today.
+
+## Operations
+
+Common tasks against a running cluster.
+
+### Connect to the cluster
+
+```bash
+N1=$(terraform output -json node_external_ips | jq -r '.n1')
+
+# SSH to a node (admin shell)
+ssh crdb@$N1
+
+# SQL CLI from your laptop using the controller-side root cert
+cockroach sql \
+  --certs-dir=ansible/certs \
+  --host=$N1:26257
+```
+
+The `cockroach` CLI on your laptop is **optional** — the role bakes the binary into every node, so `ssh crdb@$N1 'sudo -u cockroach /usr/local/bin/cockroach sql --certs-dir=/var/lib/cockroach/certs --host=localhost'` always works.
+
+### Re-run only part of the playbook
+
+```bash
+make provision EXTRA="--tags certs"        # re-issue node certs (e.g., after adding LB IP)
+make provision EXTRA="--tags admin_user"   # re-create or update the DB Console user
+make provision-check                       # --check --diff dry-run, no changes
+```
+
+### Rotate the DB Console password
+
+```bash
+make rotate-admin-password                 # only when password is auto-generated
+```
+
+Refuses to run if `var.crdb_admin_password` is set explicitly (you manage it; we won't second-guess). Otherwise: deletes the cached file, re-runs the `admin_user` task, prints the new password.
+
+### Rotate the CA
+
+```bash
+make clean-ca                              # destructive: deletes ansible/certs/
+make destroy                               # remove the cluster (node certs go with it)
+PROJECT_ID=… ./scripts/quickstart.sh       # fresh deploy regenerates the CA
+```
+
+### Trust the CA in your macOS keychain
+
+So the browser stops warning on the admin UI:
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain ansible/certs/ca.crt
+```
+
+To untrust later: `sudo security delete-certificate -c "Cockroach CA" -t /Library/Keychains/System.keychain`.
+
+### Tear it all down
+
+```bash
+PROJECT_ID=… ./scripts/quickstart.sh destroy   # removes the 28 GCP resources
+make clean-ca                                  # optional: also rotate the CA
+gcloud storage rm -r gs://${PROJECT_ID}-tfstate-crdb   # optional: also delete state bucket
+```
+
+`terraform destroy` preserves the GCS state bucket and `ansible/certs/` so a future deploy reuses the same CA without rotating client certs. Two extra commands above to wipe each if you actually want a fresh start.
+
+## Cost
+
+The default 5-node `n2-standard-4` topology costs roughly **\$1.50/hr** while running:
+
+| Component | Count | ~Monthly @ 24/7 | Hourly |
+|---|---|---|---|
+| `n2-standard-4` VMs | 5 | ~$700 | ~$0.97 |
+| `pd-ssd` 250 GB | 5 | ~$170 | ~$0.24 |
+| External static IPs | 5 | ~$15 | ~$0.02 |
+| Subnet egress (cross-region) | varies | varies | varies |
+| GCS state bucket | 1 | <$1 | negligible |
+
+So roughly $36/day if left running. The scaffold is built for spin-up/tear-down workflows; leave it running only as long as you're actively using it.
+
+## Troubleshooting
+
+Issues we've actually hit during testing, in order of how likely you are to encounter them.
+
+### `wait_for_connection` times out on every host
+
+Symptom: 5-minute timeout on every node from the `wait_for_connection` pre-task. Cluster IPs are reachable from a different network but not from yours.
+
+**Cause:** your egress IP isn't in `var.admin_cidrs`. The GCE firewall (`allow-ssh`) only opens port 22 to the listed CIDRs, so SSH connections silently drop.
+
+**Fix:** the `scripts/quickstart.sh` flow auto-detects this — it queries `checkip.amazonaws.com`, compares against the CIDRs in `terraform.tfvars`, and prepends `<your-ip>/32` if not covered (saving a backup at `terraform.tfvars.bak`). The follow-up `terraform apply` updates the firewall rule and the playbook can connect.
+
+If you bypass the script and `make deploy` directly, fix manually:
+
+```bash
+sed -i '' "s|admin_cidrs = \[|admin_cidrs = [\"$(curl -s https://checkip.amazonaws.com)/32\", |" terraform.tfvars
+terraform apply -auto-approve   # ~30s, only firewall rules change
+```
+
+### One VM unreachable, others fine
+
+Symptom: 4 of 5 nodes succeed, one (often n2 in us-central1-b) is `UNREACHABLE`. Without the `wait_for_connection` fix the play used to continue without it and the cluster came up 4-of-5; with the fix in place, the slow VM gets up to 5 minutes to come online.
+
+**Cause:** GCE VM boot times vary by zone; the slowest VM occasionally takes ~60–90s to be reachable on SSH.
+
+**Fix:** `wait_for_connection` already handles this in normal cases. If a VM is *genuinely* stuck (e.g., 5 min and still unreachable), reset it: `gcloud compute instances reset crdb-n2 --zone=us-central1-b --project=$PROJECT_ID`, then re-run `make provision`.
+
+### GCE capacity stockout in a region
+
+Symptom: `terraform apply` fails with `STOCKOUT, sub-state:STOCKOUT, resource type:compute` for `n2-standard-4 VM instance is currently unavailable in zone X`.
+
+**Cause:** GCP capacity in that specific zone is exhausted. Common in smaller regions like `us-east5`.
+
+**Fix:** override `var.topology` to use a different zone. Example: `us-east5-a` is full → switch to `us-east5-b` or `us-east5-c`, or fall back to `us-east1` entirely. The variable lets you swap without code changes:
+
+```hcl
+topology = {
+  # ... us-central, us-east-1 unchanged ...
+  "us-east-2" = {
+    region         = "us-east1"          # was us-east5
+    cidr           = "10.30.0.0/24"
+    locality_label = "us-east-2"
+    zones          = ["us-east1-b"]
+    node_count     = 1
+  }
+}
+```
+
+Then `terraform apply` again. The locality label stays `us-east-2`, so `sql/zone-configs.sql.j2` still works without edits.
+
+### Browser warns "Connection is not private" on the admin UI
+
+Symptom: Chrome/Safari shows `NET::ERR_CERT_AUTHORITY_INVALID` on `https://<node-ip>:8080`.
+
+**Cause:** the admin UI cert is signed by our self-signed CA (`ansible/certs/ca.crt`), which isn't in your browser's trust store.
+
+**Fix:** import the CA into macOS Keychain (see Operations → "Trust the CA in your macOS keychain"). One-time. Or just click through the warning for ad-hoc access — the connection is still TLS-encrypted, you're just acknowledging the CA isn't system-trusted.
+
+### `cannot edit admin role` from the admin_user task
+
+Symptom: Ansible's `Create or update DB Console admin user` task fails (often censored by `no_log: true`).
+
+**Cause:** you set `var.crdb_admin_user = "admin"` (or `"root"`). Both are built-in CRDB roles whose passwords are not editable; CRDB rejects `ALTER USER <them> WITH PASSWORD '...'` with `ERROR: cannot edit admin role` (SQLSTATE 42501).
+
+**Fix:** Terraform variable validation now rejects these at plan time. If you somehow get past it, change to anything else (default is `consoleadmin`).
+
+### Mismatched host keys after recreate
+
+Symptom: `ssh` to a node IP errors with `WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!` and refuses to connect.
+
+**Cause:** Terraform reserves external IPs by name, so destroyed-and-recreated clusters reuse the same IPs — but each new VM has a fresh SSH host key. Your `~/.ssh/known_hosts` still has the old key for that IP.
+
+**Fix:** drop the old keys before re-deploying:
+
+```bash
+for ip in $(terraform output -json node_external_ips | jq -r '.[]'); do
+  ssh-keygen -R "$ip" 2>/dev/null
+done
+```
+
+Or pass `-o StrictHostKeyChecking=accept-new` to the `ssh` invocation to accept the new key without prompting.
+
+### Stale terraform.tfvars after a fresh `cp`
+
+Symptom: `terraform apply` errors with `no file exists at "/Users/.../.ssh/id_ed25519.pub"` or shows `project = "my-gcp-project-id"` in the plan.
+
+**Cause:** you re-ran `cp terraform.tfvars.example terraform.tfvars` and clobbered your customized file. The example contains placeholders.
+
+**Fix:** the README quickstart now uses `cp -n` (no-clobber) and `scripts/quickstart.sh` refuses to deploy if it detects placeholder values still in `terraform.tfvars`. If you hit this manually: re-edit your `project_id`, `admin_cidrs`, and `ssh_pubkey_path` to your real values.
 
 ## Roadmap / out of scope
 
