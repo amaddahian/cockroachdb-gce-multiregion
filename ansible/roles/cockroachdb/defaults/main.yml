@@ -42,6 +42,14 @@ crdb_dns_name: ""
 # can connect to --host=<lb_ip> with sslmode=verify-full.
 crdb_lb_ip: ""
 
+# DB Console admin user. crdb_admin_user="" disables admin user creation.
+# crdb_admin_password="" triggers auto-generation; the resolved value is
+# cached at crdb_admin_password_file on the controller for retrieval and
+# for idempotency across re-runs.
+crdb_admin_user: "admin"
+crdb_admin_password: ""
+crdb_admin_password_file: "{{ playbook_dir }}/../certs/admin_password.txt"
+
 # Where the CA cert and key get fetched back to on the controller.
 # Single source of truth across re-runs — losing this dir while the
 # cluster still has node certs is detected and refused (see certs.yml).

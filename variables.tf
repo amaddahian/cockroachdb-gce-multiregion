@@ -118,6 +118,23 @@ variable "crdb_max_sql_memory" {
 }
 
 # -----------------------------------------------------------------------------
+# DB Console admin user
+# -----------------------------------------------------------------------------
+
+variable "crdb_admin_user" {
+  description = "Username to create for DB Console (web UI) login. Set to \"\" to skip user creation entirely (DB Console will reject all logins)."
+  type        = string
+  default     = "admin"
+}
+
+variable "crdb_admin_password" {
+  description = "Password for crdb_admin_user. Empty = auto-generate a 24-char alphanumeric password and stash it at ansible/certs/admin_password.txt on the controller (gitignored, mode 0600). Set explicitly to use your own password."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+# -----------------------------------------------------------------------------
 # DNS (opt-in)
 # -----------------------------------------------------------------------------
 

@@ -226,6 +226,30 @@ verify() {
   echo "  All node IPs     terraform output node_external_ips"
   echo "  SSH to a node    ssh crdb@$n1"
   echo "  Tear it down     PROJECT_ID=$PROJECT_ID $0 destroy"
+
+  # DB Console credentials. Pull username from the ansible_group_vars output
+  # (which is JSON-readable even though marked sensitive). Pull password from
+  # the controller-side stash if it exists; otherwise note that one was set
+  # explicitly via crdb_admin_password and won't be re-displayed here.
+  local admin_user admin_pw_file admin_pw_explicit
+  admin_user=$(terraform output -json ansible_group_vars 2>/dev/null | jq -r '.crdb_admin_user // ""')
+  admin_pw_explicit=$(terraform output -json ansible_group_vars 2>/dev/null | jq -r '.crdb_admin_password // ""')
+  admin_pw_file="ansible/certs/admin_password.txt"
+
+  if [[ -n "$admin_user" ]]; then
+    green ""
+    green "DB Console credentials:"
+    echo "  Username         $admin_user"
+    if [[ -n "$admin_pw_explicit" ]]; then
+      echo "  Password         (set via var.crdb_admin_password — not displayed)"
+    elif [[ -f "$admin_pw_file" ]]; then
+      echo "  Password         $(cat "$admin_pw_file")"
+      yellow "                   stored at $admin_pw_file (mode 0600). Rotate with 'make rotate-admin-password'."
+    else
+      warn "no admin password found at $admin_pw_file"
+    fi
+  fi
+
   green ""
   yellow "Reminder: cluster costs ~\$1.50/hr while running. Don't forget to destroy."
 }

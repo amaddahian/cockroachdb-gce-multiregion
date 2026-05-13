@@ -1,0 +1,63 @@
+---
+# Create or update a DB Console (web UI) admin user.
+#
+# Why this exists: CockroachDB in secure mode ships with only the `root`
+# user, which is cert-only and can't log into the web UI. Without this
+# task, the cluster comes up but the DB Console rejects every login.
+#
+# Behavior:
+#   - crdb_admin_user="" → skip entirely
+#   - crdb_admin_password="" → use lookup('password', ...) to generate
+#     and persist a 24-char alphanumeric password at
+#     {{ crdb_admin_password_file }}. lookup() reuses the file on
+#     subsequent runs, so re-provisions don't churn the password.
+#   - crdb_admin_password="<set>" → use as-is (user-managed).
+#
+# SQL is idempotent:
+#   - CREATE USER IF NOT EXISTS handles existing users
+#   - ALTER USER ... WITH PASSWORD updates the password if it changed
+#   - GRANT admin TO ... is itself idempotent
+#
+# `no_log: true` on tasks that touch the password keeps it out of
+# ansible-playbook output, runner logs, and `ansible-playbook -v`.
+
+- name: Skip admin user creation
+  ansible.builtin.debug:
+    msg: "crdb_admin_user is empty — DB Console will reject all logins until you create one manually"
+  when: crdb_admin_user | length == 0
+  run_once: true
+
+- name: Create or update DB Console admin user
+  ansible.builtin.command:
+    cmd: >-
+      {{ crdb_install_dir }}/cockroach sql
+      --certs-dir={{ crdb_certs_dir }}
+      --host=localhost:{{ crdb_sql_port }}
+      -e
+      "CREATE USER IF NOT EXISTS {{ crdb_admin_user }};
+       ALTER USER {{ crdb_admin_user }} WITH PASSWORD '{{ _crdb_admin_pw }}';
+       GRANT admin TO {{ crdb_admin_user }};"
+  vars:
+    # Inline lookup runs on the controller. When crdb_admin_password is empty,
+    # lookup('password', ...) generates the password and writes it to disk on
+    # first call; subsequent calls return the cached value (idempotent).
+    _crdb_admin_pw: >-
+      {{ crdb_admin_password
+         if (crdb_admin_password | length > 0)
+         else lookup('password', crdb_admin_password_file ~ ' length=24 chars=ascii_letters,digits') }}
+  delegate_to: "{{ groups['cockroachdb'][0] }}"
+  run_once: true
+  when: crdb_admin_user | length > 0
+  changed_when: false
+  no_log: true
+
+- name: Lock down auto-generated admin password file on controller
+  ansible.builtin.file:
+    path: "{{ crdb_admin_password_file }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when:
+    - crdb_admin_user | length > 0
+    - crdb_admin_password | length == 0

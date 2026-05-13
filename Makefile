@@ -1,4 +1,4 @@
-.PHONY: help init plan apply inventory provision provision-check deploy destroy clean clean-ca fmt validate lint syntax-check verify
+.PHONY: help init plan apply inventory provision provision-check deploy destroy clean clean-ca rotate-admin-password fmt validate lint syntax-check verify
 
 # Default Ansible playbook args (override on the CLI: make provision EXTRA="--tags certs")
 EXTRA ?=
@@ -21,6 +21,7 @@ help:
 	@echo "  destroy          terraform destroy (CA at ansible/certs/ is preserved)"
 	@echo "  clean            remove the generated inventory file"
 	@echo "  clean-ca         delete ansible/certs/ — DESTRUCTIVE, rotates CA on next deploy"
+	@echo "  rotate-admin-password  generate a new DB Console admin password and apply it"
 	@echo "  fmt              terraform fmt -recursive"
 	@echo "  validate         terraform fmt -check && terraform validate"
 	@echo "  lint             ansible-lint"
@@ -86,6 +87,23 @@ clean-ca:
 	@echo "Existing node certs will mismatch. Press Ctrl-C in 5s to abort."
 	@sleep 5
 	rm -rf $(ANSIBLE_DIR)/certs
+
+# Rotate the DB Console admin password. Removes the cached file so the next
+# provision generates a new one, runs only the admin_user task (fast — no
+# storage/install/cert churn), then prints the new password.
+rotate-admin-password: $(INVENTORY)
+	@if grep -qE '^[[:space:]]*crdb_admin_password[[:space:]]*=' terraform.tfvars 2>/dev/null \
+	   && ! grep -qE '^[[:space:]]*crdb_admin_password[[:space:]]*=[[:space:]]*""' terraform.tfvars 2>/dev/null; then \
+	  echo "ERROR: crdb_admin_password is set explicitly in terraform.tfvars."; \
+	  echo "       Edit it there to rotate, then run 'make provision EXTRA=\"--tags admin_user\"'."; \
+	  exit 1; \
+	fi
+	rm -f $(ANSIBLE_DIR)/certs/admin_password.txt
+	cd $(ANSIBLE_DIR) && ansible-playbook -i inventory/hosts.yml playbooks/site.yml --tags admin_user
+	@echo
+	@echo "New DB Console password:"
+	@cat $(ANSIBLE_DIR)/certs/admin_password.txt
+	@echo
 
 fmt:
 	terraform fmt -recursive

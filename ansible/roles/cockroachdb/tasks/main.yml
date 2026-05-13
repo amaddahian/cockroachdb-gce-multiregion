@@ -17,3 +17,7 @@
 
 - name: Apply multi-region zone configurations
   ansible.builtin.include_tasks: zone_configs.yml
+
+- name: Create or update DB Console admin user
+  ansible.builtin.include_tasks: admin_user.yml
+  tags: [admin_user]

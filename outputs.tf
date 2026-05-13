@@ -32,7 +32,14 @@ output "ansible_group_vars" {
         node_count = var.topology[k].node_count
       }
     ]
+    # DB Console admin user. crdb_admin_password is intentionally NOT in this
+    # output unless explicitly set — when empty, the Ansible role generates
+    # one and stashes it on the controller side (ansible/certs/admin_password.txt).
+    crdb_admin_user     = var.crdb_admin_user
+    crdb_admin_password = var.crdb_admin_password
   }
+  # The whole output is sensitive because crdb_admin_password may be set.
+  sensitive = true
 }
 
 output "dns_records" {
