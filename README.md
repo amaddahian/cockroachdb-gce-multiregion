@@ -46,7 +46,7 @@ Note: the CRDB `--locality` labels (`us-central`, `us-east-1`, `us-east-2`) are 
 
 **Machine sizing baseline.** `n2-standard-4` with a 250GB `pd-ssd` boot disk matches what `roachprod` reaches for as a sane default (`pkg/roachprod/vm/gce/gcloud.go`). It's enough to run the full `tpcc` workload at low warehouse counts and exercise the cluster for correctness work. Bump to `n2-standard-8`/`n2-standard-16` and 1TB+ for sustained production load — both are single variable changes.
 
-**No load balancer.** We expose per-node IPs as Terraform outputs and let you wire the connection string yourself. A regional internal TCP LB is the right answer once you have a real application topology and care about not pinning clients to specific nodes — but it adds resources, an interaction with health checks, and another knob to tune. Start without; add when you need it.
+**Load balancers are opt-in at the Terraform layer.** Per-node internal + external IPs are always created and exposed as outputs so you can wire connection strings directly. Two LBs are available behind feature flags: a regional internal TCP NLB (`var.create_internal_lb`) for in-VPC clients, and a regional external NLB (`var.create_external_lb`) for a single public VIP fronting both SQL and admin UI. They add resources, health-check interactions, and another knob to tune — keep them off when you don't need them. `scripts/quickstart.sh` flips its own default to `--lb on` for the external LB (overrideable with `--lb off`) since the most common reason to spin this cluster up at all is "I want to hit it from my laptop"; the manual `make deploy` flow leaves both LBs off unless you set the tfvars.
 
 ## Architecture walkthrough
 
@@ -180,10 +180,19 @@ Prerequisites (all on the machine running `make deploy`):
 `scripts/quickstart.sh` wraps the full bring-up in one command, with pre-flight checks (terraform/ansible/jq/gcloud installed, ADC ready, SSH key present), auto-detection of your external IP for `admin_cidrs`, idempotent state-bucket bootstrap, and end-to-end verify:
 
 ```bash
-PROJECT_ID=my-project ./scripts/quickstart.sh             # deploy + verify
-PROJECT_ID=my-project ./scripts/quickstart.sh destroy     # tear down
-PROJECT_ID=my-project ./scripts/quickstart.sh redeploy    # destroy + deploy
+PROJECT_ID=my-project ./scripts/quickstart.sh                        # deploy + verify (external LB ON by default)
+PROJECT_ID=my-project ./scripts/quickstart.sh deploy --lb off        # deploy without the external LB
+PROJECT_ID=my-project ./scripts/quickstart.sh deploy --lb-region us-east4  # LB in a non-default region
+PROJECT_ID=my-project ./scripts/quickstart.sh destroy                # tear down
+PROJECT_ID=my-project ./scripts/quickstart.sh redeploy --lb off      # destroy + redeploy without LB
 ```
+
+**Flags** (apply to `deploy` and `redeploy`):
+
+| Flag | Default | Description |
+|---|---|---|
+| `--lb on\|off` | `on` | Enable/disable the external regional NLB. Upserts `create_external_lb` in `terraform.tfvars` on every run (a `.bak` of the pre-script tfvars is kept). |
+| `--lb-region NAME` | `us-central1` | Region for the external LB. Must be one of `var.topology[*].region`. |
 
 Optional env overrides: `SSH_KEY_PATH` (default auto-detects `~/.ssh/id_*.pub`), `ADMIN_CIDRS` (comma-separated, default auto-detects via `checkip.amazonaws.com`), `STATE_LOCATION` (default `us-central1`).
 
@@ -388,6 +397,8 @@ cockroach sql --certs-dir=/var/lib/cockroach/certs --host=<LB_IP>:26257 -e 'SELE
 ### External (public) load balancer (opt-in)
 
 A regional **external** Network Load Balancer with a public IP, fronting **both** the SQL port (26257) and the admin UI (8080). Use this when you want a single public VIP reachable from your laptop or any client outside the VPC, instead of pinning to per-node IPs.
+
+> The Terraform variable defaults to `false` (opt-in), but `scripts/quickstart.sh` defaults to `--lb on` — so a quickstart-driven deploy creates this LB unless you pass `--lb off`. The manual `make deploy` flow uses the Terraform default and requires you to enable it via `terraform.tfvars` below.
 
 ```hcl
 create_external_lb = true

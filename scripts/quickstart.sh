@@ -5,10 +5,19 @@
 # checkout.
 #
 # USAGE
-#   PROJECT_ID=my-project ./scripts/quickstart.sh           # deploy + verify
-#   PROJECT_ID=my-project ./scripts/quickstart.sh destroy   # tear down
-#   PROJECT_ID=my-project ./scripts/quickstart.sh redeploy  # destroy + deploy
-#   PROJECT_ID=my-project ./scripts/quickstart.sh verify    # cluster checks
+#   PROJECT_ID=my-project ./scripts/quickstart.sh                       # deploy + verify (external LB ON by default)
+#   PROJECT_ID=my-project ./scripts/quickstart.sh deploy --lb off       # deploy without the external LB
+#   PROJECT_ID=my-project ./scripts/quickstart.sh deploy --lb-region us-east4
+#   PROJECT_ID=my-project ./scripts/quickstart.sh destroy               # tear down
+#   PROJECT_ID=my-project ./scripts/quickstart.sh redeploy --lb off     # destroy + redeploy without LB
+#   PROJECT_ID=my-project ./scripts/quickstart.sh verify                # cluster checks
+#
+# FLAGS
+#   --lb on|off       Enable/disable the external regional NLB. Default: on.
+#                     Upserts create_external_lb in terraform.tfvars on every
+#                     run (a .bak of the pre-script tfvars is kept).
+#   --lb-region NAME  Region for the external LB. Default: us-central1.
+#                     Must be one of var.topology[*].region.
 #
 # OPTIONAL ENV OVERRIDES
 #   SSH_KEY_PATH    public key path; default auto-detects ~/.ssh/id_*.pub
@@ -25,6 +34,33 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 ACTION="${1:-deploy}"
+if [[ $# -gt 0 ]]; then shift; fi
+
+# External LB defaults: ON, region us-central1 (first region in the default
+# topology). Override with --lb off or --lb-region <region>.
+LB="on"
+LB_REGION="us-central1"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lb)
+      LB="${2:-}"
+      [[ "$LB" == "on" || "$LB" == "off" ]] \
+        || { printf 'ERR --lb must be "on" or "off" (got: %q)\n' "$LB" >&2; exit 1; }
+      shift 2
+      ;;
+    --lb-region)
+      LB_REGION="${2:-}"
+      [[ -n "$LB_REGION" ]] \
+        || { echo 'ERR --lb-region requires a value' >&2; exit 1; }
+      shift 2
+      ;;
+    *)
+      printf 'ERR unknown option: %q\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 # --- styling ---
 red()    { printf "\033[0;31m%s\033[0m\n" "$*" >&2; }
@@ -36,6 +72,45 @@ step()  { blue ""; blue "==> $*"; }
 ok()    { green   "  OK  $*"; }
 warn()  { yellow  "  !!  $*"; }
 die()   { red     "  ERR $*"; exit 1; }
+
+# Back up terraform.tfvars once per script run. Multiple mutators
+# (ensure_egress_covered, apply_lb_settings) call this; only the first call
+# actually copies, so the .bak always reflects the pre-script state.
+TFVARS_BACKED_UP=0
+backup_tfvars_once() {
+  if [[ "$TFVARS_BACKED_UP" -eq 0 && -f terraform.tfvars ]]; then
+    cp terraform.tfvars terraform.tfvars.bak
+    TFVARS_BACKED_UP=1
+  fi
+}
+
+# Upsert "<key> = <value>" in terraform.tfvars. Replaces the line in-place if
+# present, appends it otherwise. Value must be pre-quoted by the caller (e.g.
+# "\"us-central1\"" for strings, "true" for bools) so we don't have to guess
+# the HCL type.
+upsert_tfvars_kv() {
+  local key="$1"
+  local value="$2"
+  backup_tfvars_once
+  if grep -qE "^[[:space:]]*${key}[[:space:]]*=" terraform.tfvars; then
+    sed -i.tmp -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" terraform.tfvars
+    rm -f terraform.tfvars.tmp
+  else
+    printf '\n%s = %s\n' "$key" "$value" >> terraform.tfvars
+  fi
+}
+
+# Apply the --lb / --lb-region flags by upserting into terraform.tfvars.
+apply_lb_settings() {
+  if [[ "$LB" == "on" ]]; then
+    upsert_tfvars_kv "create_external_lb" "true"
+    upsert_tfvars_kv "external_lb_region" "\"$LB_REGION\""
+    ok "external LB: ENABLED (region $LB_REGION)"
+  else
+    upsert_tfvars_kv "create_external_lb" "false"
+    ok "external LB: disabled"
+  fi
+}
 
 # --- preflight ---
 preflight() {
@@ -157,6 +232,7 @@ EOF
   fi
 
   ensure_egress_covered
+  apply_lb_settings
 }
 
 # Verify that this host's current egress IP is covered by at least one CIDR
@@ -187,7 +263,7 @@ sys.exit(0 if covered else 1)
   warn "egress IP $CURRENT_EGRESS_IP is NOT covered by admin_cidrs in terraform.tfvars"
   warn "current admin_cidrs: $(echo "$cidrs" | tr '\n' ' ')"
   warn "prepending $CURRENT_EGRESS_IP/32 (backup at terraform.tfvars.bak)"
-  cp terraform.tfvars terraform.tfvars.bak
+  backup_tfvars_once
   sed -i.tmp "s|admin_cidrs = \[|admin_cidrs = [\"$CURRENT_EGRESS_IP/32\", |" terraform.tfvars
   rm -f terraform.tfvars.tmp
   ok "$(grep '^admin_cidrs' terraform.tfvars)"
@@ -294,7 +370,11 @@ case "$ACTION" in
     ;;
   *)
     cat >&2 <<EOF
-Usage: PROJECT_ID=my-project $0 [deploy|destroy|redeploy|verify]
+Usage: PROJECT_ID=my-project $0 [deploy|destroy|redeploy|verify] [--lb on|off] [--lb-region REGION]
+
+Flags:
+  --lb on|off       Enable/disable the external regional NLB. Default: on.
+  --lb-region NAME  Region for the external LB. Default: us-central1.
 
 Optional env overrides:
   SSH_KEY_PATH    public key path; default auto-detects ~/.ssh/id_*.pub
