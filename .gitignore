@@ -10,6 +10,7 @@ crash.*.log
 
 # user-specific values
 *.tfvars
+*.tfvars.bak
 !terraform.tfvars.example
 
 # backend config: bucket name is project-specific
