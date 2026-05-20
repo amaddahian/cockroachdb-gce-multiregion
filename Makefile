@@ -1,4 +1,4 @@
-.PHONY: help init plan apply inventory provision provision-check deploy destroy clean clean-ca rotate-admin-password fmt validate lint syntax-check verify workload-init workload-plan workload-apply workload-destroy workload-test
+.PHONY: help init plan apply inventory provision provision-check deploy destroy clean clean-ca rotate-admin-password fmt validate lint syntax-check verify workload workload-init workload-plan workload-apply workload-destroy workload-bootstrap workload-test workload-redeploy
 
 # Default Ansible playbook args (override on the CLI: make provision EXTRA="--tags certs")
 EXTRA ?=
@@ -33,12 +33,17 @@ help:
 	@echo "  verify           validate + lint + syntax-check"
 	@echo ""
 	@echo "Workload VM (opt-in adjunct stack under $(WL_DIR)):"
+	@echo "  workload             full path: apply workload VM + bootstrap + run KV (60s default)"
+	@echo "                         override args: make workload EXTRA=\"--duration 5m --concurrency 128\""
+	@echo "  workload-bootstrap   install cockroach + scp certs onto the workload VM (skip if present)"
+	@echo "  workload-test        run 'cockroach workload run kv' against all cluster nodes (preconditions assumed)"
+	@echo "  workload-redeploy    destroy + apply + bootstrap + test"
+	@echo ""
+	@echo "Workload terraform-only targets (bare TF lifecycle, no app-level setup):"
 	@echo "  workload-init    terraform init for the workload stack (uses $(WL_DIR)/backend.hcl if present)"
 	@echo "  workload-plan    terraform plan for the workload stack"
 	@echo "  workload-apply   terraform apply for the workload stack"
 	@echo "  workload-destroy terraform destroy for the workload stack"
-	@echo "  workload-test    run 'cockroach workload run kv' against all cluster nodes via the workload VM (60s default)"
-	@echo "                     override args: make workload-test EXTRA=\"--duration 5m --concurrency 128\""
 
 init:
 	@if [ -f $(TF_DIR)/backend.hcl ]; then \
@@ -155,12 +160,24 @@ workload-apply:
 workload-destroy:
 	$(WL) destroy
 
-# Single-command KV smoke test against all cluster nodes via the workload VM.
-# Preconditions (cluster + workload VM applied, cockroach binary + certs on the
-# VM) are enforced by the script; missing pieces fail fast with a clear error.
-# Override args:  make workload-test EXTRA="--duration 5m --concurrency 128"
+# High-level lifecycle wrappers around workload.sh. Use these for end-to-end
+# flows; the bare workload-{init,plan,apply,destroy} targets above are the
+# terraform-only escape hatches if you want to inspect a plan, etc.
+#
+# `workload` (no args) does the full path in one command: terraform apply,
+# install cockroach + certs on the VM (idempotent — skips if already done),
+# then run a 60s KV smoke against all cluster nodes.
+workload:
+	bash workload.sh $(EXTRA)
+
+workload-bootstrap:
+	bash workload.sh bootstrap
+
 workload-test:
-	bash workload-test.sh $(EXTRA)
+	bash workload.sh test $(EXTRA)
+
+workload-redeploy:
+	bash workload.sh redeploy $(EXTRA)
 
 $(INVENTORY):
 	@echo "ERROR: $(INVENTORY) does not exist. Run 'make inventory' (after 'terraform apply')." >&2

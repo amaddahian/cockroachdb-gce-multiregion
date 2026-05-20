@@ -12,3 +12,8 @@ output "ssh_command" {
   description = "Convenience SSH command. Pass through to the shell to connect."
   value       = "ssh ${var.ssh_user}@${google_compute_address.external.address}"
 }
+
+output "ssh_user" {
+  description = "Linux user provisioned on the workload VM (matches var.ssh_user). Read by workload.sh."
+  value       = var.ssh_user
+}
