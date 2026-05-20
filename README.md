@@ -579,6 +579,15 @@ ssh crdb@$WL_IP "cockroach workload init kv '$CONN'"
 ssh crdb@$WL_IP "cockroach workload run kv --duration=5m --concurrency=64 '$CONN'"
 ```
 
+**One-command smoke test.** Once the install steps above are done, you can re-run a 1-minute KV workload across all cluster nodes with a single command. The script reads node IPs from the `terraform/gcp` outputs, builds one connection URL per node (so `cockroach workload` round-robins across all 3 regions), and SSHes into the workload VM to invoke `cockroach workload init kv` + `run kv`. It fails fast with a clear diagnosis if any precondition is missing.
+
+```bash
+make workload-test                                              # default: 60s, concurrency 64
+make workload-test EXTRA="--duration 5m --concurrency 128"      # longer / heavier
+```
+
+Cockroach's own per-`--display-every=10s` lines plus the final summary (ops/sec, p50/p95/p99) are the source of truth — the script just orchestrates.
+
 Tear it down when you're done — the cluster stack is unaffected:
 
 ```bash

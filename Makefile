@@ -1,4 +1,4 @@
-.PHONY: help init plan apply inventory provision provision-check deploy destroy clean clean-ca rotate-admin-password fmt validate lint syntax-check verify workload-init workload-plan workload-apply workload-destroy
+.PHONY: help init plan apply inventory provision provision-check deploy destroy clean clean-ca rotate-admin-password fmt validate lint syntax-check verify workload-init workload-plan workload-apply workload-destroy workload-test
 
 # Default Ansible playbook args (override on the CLI: make provision EXTRA="--tags certs")
 EXTRA ?=
@@ -37,6 +37,8 @@ help:
 	@echo "  workload-plan    terraform plan for the workload stack"
 	@echo "  workload-apply   terraform apply for the workload stack"
 	@echo "  workload-destroy terraform destroy for the workload stack"
+	@echo "  workload-test    run 'cockroach workload run kv' against all cluster nodes via the workload VM (60s default)"
+	@echo "                     override args: make workload-test EXTRA=\"--duration 5m --concurrency 128\""
 
 init:
 	@if [ -f $(TF_DIR)/backend.hcl ]; then \
@@ -152,6 +154,13 @@ workload-apply:
 
 workload-destroy:
 	$(WL) destroy
+
+# Single-command KV smoke test against all cluster nodes via the workload VM.
+# Preconditions (cluster + workload VM applied, cockroach binary + certs on the
+# VM) are enforced by the script; missing pieces fail fast with a clear error.
+# Override args:  make workload-test EXTRA="--duration 5m --concurrency 128"
+workload-test:
+	bash workload-test.sh $(EXTRA)
 
 $(INVENTORY):
 	@echo "ERROR: $(INVENTORY) does not exist. Run 'make inventory' (after 'terraform apply')." >&2
