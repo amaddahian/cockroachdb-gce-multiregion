@@ -65,34 +65,44 @@ The five tiers above:
 4. **Deployment & configuration** — the `cockroachdb` Ansible role runs storage → install → certs → service → init → zone_configs against the inventory.
 5. **Target cluster & persistent state** — a 5-node multi-region cluster with the topology-driven zone configs, TLS verify-full, and chrony for clock skew.
 
-The same flow as a Mermaid diagram (kept editable in the README source — GitHub renders it natively):
+The flow above as a Mermaid diagram, extended with the `quickstart.sh` wrapper and the opt-in workload VM stack (kept editable in the README source — GitHub renders it natively):
 
 ```mermaid
 flowchart TD
     classDef opt stroke-dasharray:5 5,fill:#fff8e1,color:#000
     classDef store fill:#e8eaf6,stroke:#3949ab,color:#000
     classDef cluster fill:#e1f5fe,stroke:#0277bd,color:#000
+    classDef wl fill:#f3e5f5,stroke:#6a1b9a,color:#000
 
     OP([Operator])
+    QS[quickstart.sh<br/>preflight · ADC check · IP auto-detect<br/>state-bucket bootstrap · deploy · verify]
     MK[Makefile<br/>init · apply · inventory · provision · deploy · destroy]
 
-    OP -->|"make deploy"| MK
+    OP -->|"./quickstart.sh (recommended)"| QS
+    OP -->|"make deploy (manual)"| MK
+    QS -->|wraps| MK
 
-    MK -->|"1\. terraform apply"| TF[Terraform<br/>network · nodes · outputs<br/>+ dns.tf · lb.tf opt-in]
+    MK -->|"1\. terraform apply"| TF[Terraform: terraform/gcp<br/>network · nodes · outputs<br/>+ dns.tf · lb.tf · lb_external.tf opt-in]
     MK -->|"2\. ansible/inventory/render.sh"| BR[render.sh<br/>terraform output → YAML]
-    MK -->|"3\. ansible-playbook"| ANS[Ansible role: cockroachdb<br/>storage · install · certs ·<br/>service · init · zone_configs]
+    MK -->|"3\. ansible-playbook"| ANS[Ansible role: cockroachdb<br/>storage · install · certs · service ·<br/>init · zone_configs · admin_user]
 
-    TF <-->|state| GCS[("GCS bucket<br/>versioned state<br/>+ rollback tags")]:::store
+    TF <-->|state| GCS[("GCS bucket<br/>versioned state")]:::store
 
-    TF -->|creates| GCP[GCP infrastructure<br/>VPC · 3 subnets · 4 firewall rules<br/>5 × GCE n2-standard-4<br/>5 × pd-ssd · 10 static IPs<br/><i>opt:</i> Cloud DNS A records<br/><i>opt:</i> regional internal NLB]:::opt
+    TF -->|creates| GCP[GCP infrastructure<br/>VPC · 3 subnets · 4 firewall rules<br/>5 × GCE n2-standard-4<br/>5 × pd-ssd · 10 static IPs<br/><i>opt:</i> Cloud DNS A records<br/><i>opt:</i> internal + external regional NLB]:::opt
 
-    TF -->|"outputs:<br/>nodes, ansible_group_vars,<br/>internal_lb_ip, dns_records"| BR
+    TF -->|"outputs:<br/>nodes, ansible_group_vars,<br/>internal_lb_ip, external_lb_ip,<br/>dns_records"| BR
     BR -->|"hosts.yml + group_vars/all.yml<br/>(crdb_topology, crdb_cache,<br/>crdb_lb_ip, crdb_dns_name)"| ANS
 
-    ANS -->|configures + bootstraps| CLUSTER[5-node multi-region CockroachDB<br/>2/2/1 voters · lease pref us-central<br/>TLS verify-full · chrony<br/>zone configs templated from topology]:::cluster
+    ANS -->|configures + bootstraps| CLUSTER[5-node multi-region CockroachDB<br/>2/2/1 voters · lease pref us-central<br/>TLS verify-full · chrony<br/>zone configs templated from topology<br/>+ DB Console admin user]:::cluster
     GCP -.provides VMs.-> CLUSTER
 
     OP -.push or PR.-> CI[GitHub Actions CI<br/>terraform fmt + validate<br/>ansible-lint + syntax-check]
+
+    OP -->|"./workload.sh · make workload"| WL[workload.sh<br/>up · bootstrap · test · down]
+    WL -->|terraform apply| WLTF[Terraform: terraform/workload<br/>workload VM in cluster VPC<br/>data sources reuse VPC + subnet]:::wl
+    WLTF -->|creates| WLVM[Workload GCE VM<br/>cockroach binary + root cert<br/>'cockroach workload run kv']:::wl
+    WLVM -.runs KV workload against.-> CLUSTER
+    WLTF <-.shared bucket.-> GCS
 ```
 
 Bring-up order:
