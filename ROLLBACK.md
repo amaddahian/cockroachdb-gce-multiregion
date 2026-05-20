@@ -52,13 +52,13 @@ gsutil ls -a gs://cockroach-ali-tfstate-crdb/crdb-cluster/default.tfstate
 # Pick a generation number from the output, then:
 gsutil cp gs://cockroach-ali-tfstate-crdb/crdb-cluster/default.tfstate#<generation> \
           gs://cockroach-ali-tfstate-crdb/crdb-cluster/default.tfstate
-terraform refresh   # confirm restored state matches infra
+terraform -chdir=terraform/gcp refresh   # confirm restored state matches infra
 ```
 
 ### Total rollback (code + infra back to the original blueprint)
 
 ```bash
-terraform destroy
+terraform -chdir=terraform/gcp destroy
 git reset --hard pre-ansible-refactor
 git push --force-with-lease origin main
 # Then resume from the original null_resource scaffold

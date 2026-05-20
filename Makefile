@@ -7,11 +7,13 @@ ANSIBLE_DIR := ansible
 PLAYBOOK    := $(ANSIBLE_DIR)/playbooks/site.yml
 INVENTORY   := $(ANSIBLE_DIR)/inventory/hosts.yml
 RENDER      := $(ANSIBLE_DIR)/inventory/render.sh
+TF_DIR      := terraform/gcp
+TF          := terraform -chdir=$(TF_DIR)
 
 help:
 	@echo "Targets:"
 	@echo "  bootstrap-state  one-time: PROJECT_ID=… make bootstrap-state — create the GCS state bucket"
-	@echo "  init             terraform init (uses backend.hcl if present, otherwise local state)"
+	@echo "  init             terraform init (uses $(TF_DIR)/backend.hcl if present, otherwise local state)"
 	@echo "  plan             terraform plan"
 	@echo "  apply            terraform apply"
 	@echo "  inventory        regenerate $(INVENTORY) from terraform outputs"
@@ -29,13 +31,13 @@ help:
 	@echo "  verify           validate + lint + syntax-check"
 
 init:
-	@if [ -f backend.hcl ]; then \
-	  echo "Initializing with remote state (backend.hcl)..."; \
-	  terraform init -backend-config=backend.hcl; \
+	@if [ -f $(TF_DIR)/backend.hcl ]; then \
+	  echo "Initializing with remote state ($(TF_DIR)/backend.hcl)..."; \
+	  $(TF) init -backend-config=backend.hcl; \
 	else \
-	  echo "No backend.hcl found — initializing with local state."; \
-	  echo "Copy backend.hcl.example to backend.hcl for GCS-backed remote state."; \
-	  terraform init; \
+	  echo "No $(TF_DIR)/backend.hcl found — initializing with local state."; \
+	  echo "Copy $(TF_DIR)/backend.hcl.example to $(TF_DIR)/backend.hcl for GCS-backed remote state."; \
+	  $(TF) init; \
 	fi
 
 bootstrap-state:
@@ -48,14 +50,14 @@ bootstrap-state:
 	fi
 	gcloud storage buckets update "gs://$$PROJECT_ID-tfstate-crdb" --versioning
 	@echo
-	@echo "Bucket ready. Now copy backend.hcl.example -> backend.hcl,"
+	@echo "Bucket ready. Now copy $(TF_DIR)/backend.hcl.example -> $(TF_DIR)/backend.hcl,"
 	@echo "set bucket = \"$$PROJECT_ID-tfstate-crdb\", and run 'make init'."
 
 plan:
-	terraform plan
+	$(TF) plan
 
 apply:
-	terraform apply $(APPROVE)
+	$(TF) apply $(APPROVE)
 
 inventory:
 	bash $(RENDER)
@@ -77,7 +79,7 @@ deploy:
 	$(MAKE) provision
 
 destroy:
-	terraform destroy
+	$(TF) destroy
 
 clean:
 	rm -f $(INVENTORY)
@@ -92,9 +94,9 @@ clean-ca:
 # provision generates a new one, runs only the admin_user task (fast — no
 # storage/install/cert churn), then prints the new password.
 rotate-admin-password: $(INVENTORY)
-	@if grep -qE '^[[:space:]]*crdb_admin_password[[:space:]]*=' terraform.tfvars 2>/dev/null \
-	   && ! grep -qE '^[[:space:]]*crdb_admin_password[[:space:]]*=[[:space:]]*""' terraform.tfvars 2>/dev/null; then \
-	  echo "ERROR: crdb_admin_password is set explicitly in terraform.tfvars."; \
+	@if grep -qE '^[[:space:]]*crdb_admin_password[[:space:]]*=' $(TF_DIR)/terraform.tfvars 2>/dev/null \
+	   && ! grep -qE '^[[:space:]]*crdb_admin_password[[:space:]]*=[[:space:]]*""' $(TF_DIR)/terraform.tfvars 2>/dev/null; then \
+	  echo "ERROR: crdb_admin_password is set explicitly in $(TF_DIR)/terraform.tfvars."; \
 	  echo "       Edit it there to rotate, then run 'make provision EXTRA=\"--tags admin_user\"'."; \
 	  exit 1; \
 	fi
@@ -106,11 +108,11 @@ rotate-admin-password: $(INVENTORY)
 	@echo
 
 fmt:
-	terraform fmt -recursive
+	$(TF) fmt -recursive
 
 validate:
-	terraform fmt -check
-	terraform validate
+	$(TF) fmt -check
+	$(TF) validate
 
 lint:
 	cd $(ANSIBLE_DIR) && ansible-lint

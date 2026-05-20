@@ -5,17 +5,17 @@
 # checkout.
 #
 # USAGE
-#   PROJECT_ID=my-project ./scripts/quickstart.sh                       # deploy + verify (external LB ON by default)
-#   PROJECT_ID=my-project ./scripts/quickstart.sh deploy --lb off       # deploy without the external LB
-#   PROJECT_ID=my-project ./scripts/quickstart.sh deploy --lb-region us-east4
-#   PROJECT_ID=my-project ./scripts/quickstart.sh destroy               # tear down
-#   PROJECT_ID=my-project ./scripts/quickstart.sh redeploy --lb off     # destroy + redeploy without LB
-#   PROJECT_ID=my-project ./scripts/quickstart.sh verify                # cluster checks
+#   PROJECT_ID=my-project ./quickstart.sh                       # deploy + verify (external LB ON by default)
+#   PROJECT_ID=my-project ./quickstart.sh deploy --lb off       # deploy without the external LB
+#   PROJECT_ID=my-project ./quickstart.sh deploy --lb-region us-east4
+#   PROJECT_ID=my-project ./quickstart.sh destroy               # tear down
+#   PROJECT_ID=my-project ./quickstart.sh redeploy --lb off     # destroy + redeploy without LB
+#   PROJECT_ID=my-project ./quickstart.sh verify                # cluster checks
 #
 # FLAGS
 #   --lb on|off       Enable/disable the external regional NLB. Default: on.
-#                     Upserts create_external_lb in terraform.tfvars on every
-#                     run (a .bak of the pre-script tfvars is kept).
+#                     Upserts create_external_lb in terraform/gcp/terraform.tfvars
+#                     on every run (a .bak of the pre-script tfvars is kept).
 #   --lb-region NAME  Region for the external LB. Default: us-central1.
 #                     Must be one of var.topology[*].region.
 #
@@ -30,8 +30,13 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
+
+# All Terraform state, .tf files, backend.hcl, and terraform.tfvars live here.
+TF_DIR="$REPO_ROOT/terraform/gcp"
+TFVARS="$TF_DIR/terraform.tfvars"
+BACKEND_HCL="$TF_DIR/backend.hcl"
 
 ACTION="${1:-deploy}"
 if [[ $# -gt 0 ]]; then shift; fi
@@ -78,8 +83,8 @@ die()   { red     "  ERR $*"; exit 1; }
 # actually copies, so the .bak always reflects the pre-script state.
 TFVARS_BACKED_UP=0
 backup_tfvars_once() {
-  if [[ "$TFVARS_BACKED_UP" -eq 0 && -f terraform.tfvars ]]; then
-    cp terraform.tfvars terraform.tfvars.bak
+  if [[ "$TFVARS_BACKED_UP" -eq 0 && -f "$TFVARS" ]]; then
+    cp "$TFVARS" "$TFVARS.bak"
     TFVARS_BACKED_UP=1
   fi
 }
@@ -92,11 +97,11 @@ upsert_tfvars_kv() {
   local key="$1"
   local value="$2"
   backup_tfvars_once
-  if grep -qE "^[[:space:]]*${key}[[:space:]]*=" terraform.tfvars; then
-    sed -i.tmp -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" terraform.tfvars
-    rm -f terraform.tfvars.tmp
+  if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$TFVARS"; then
+    sed -i.tmp -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${value}|" "$TFVARS"
+    rm -f "$TFVARS.tmp"
   else
-    printf '\n%s = %s\n' "$key" "$value" >> terraform.tfvars
+    printf '\n%s = %s\n' "$key" "$value" >> "$TFVARS"
   fi
 }
 
@@ -198,26 +203,26 @@ bootstrap_state() {
 
 # --- write backend.hcl + terraform.tfvars (preserve customizations) ---
 configure() {
-  step "Configure backend.hcl + terraform.tfvars"
+  step "Configure $BACKEND_HCL + $TFVARS"
 
-  if [[ -f backend.hcl ]]; then
-    ok "backend.hcl exists (preserved)"
+  if [[ -f "$BACKEND_HCL" ]]; then
+    ok "$BACKEND_HCL exists (preserved)"
   else
-    cat > backend.hcl <<EOF
+    cat > "$BACKEND_HCL" <<EOF
 bucket = "$STATE_BUCKET"
 prefix = "crdb-cluster"
 EOF
-    ok "wrote backend.hcl"
+    ok "wrote $BACKEND_HCL"
   fi
 
-  if [[ -f terraform.tfvars ]]; then
-    if grep -qE 'my-gcp-project-id|"1\.2\.3\.4/32"' terraform.tfvars; then
-      die "terraform.tfvars contains placeholder values. Remove it (rm terraform.tfvars)
+  if [[ -f "$TFVARS" ]]; then
+    if grep -qE 'my-gcp-project-id|"1\.2\.3\.4/32"' "$TFVARS"; then
+      die "$TFVARS contains placeholder values. Remove it (rm $TFVARS)
     and re-run, or edit it manually to fix project_id / admin_cidrs / ssh_pubkey_path."
     fi
-    ok "terraform.tfvars exists (preserved)"
+    ok "$TFVARS exists (preserved)"
   else
-    cat > terraform.tfvars <<EOF
+    cat > "$TFVARS" <<EOF
 project_id  = "$PROJECT_ID"
 admin_cidrs = [$ADMIN_CIDRS_HCL]
 
@@ -228,7 +233,7 @@ machine_type      = "n2-standard-4"
 boot_disk_size_gb = 50
 data_disk_size_gb = 250
 EOF
-    ok "wrote terraform.tfvars"
+    ok "wrote $TFVARS"
   fi
 
   ensure_egress_covered
@@ -243,10 +248,10 @@ ensure_egress_covered() {
   [[ -n "${CURRENT_EGRESS_IP:-}" ]] || { warn "skipping egress check (no current IP)"; return 0; }
 
   local cidrs
-  cidrs=$(awk -F'[][]' '/^[[:space:]]*admin_cidrs/{print $2}' terraform.tfvars \
+  cidrs=$(awk -F'[][]' '/^[[:space:]]*admin_cidrs/{print $2}' "$TFVARS" \
             | tr -d ' "' | tr ',' '\n' | grep -v '^$' || true)
   if [[ -z "$cidrs" ]]; then
-    warn "no admin_cidrs found in terraform.tfvars — skipping egress check"
+    warn "no admin_cidrs found in $TFVARS — skipping egress check"
     return 0
   fi
 
@@ -260,13 +265,13 @@ sys.exit(0 if covered else 1)
     return 0
   fi
 
-  warn "egress IP $CURRENT_EGRESS_IP is NOT covered by admin_cidrs in terraform.tfvars"
+  warn "egress IP $CURRENT_EGRESS_IP is NOT covered by admin_cidrs in $TFVARS"
   warn "current admin_cidrs: $(echo "$cidrs" | tr '\n' ' ')"
-  warn "prepending $CURRENT_EGRESS_IP/32 (backup at terraform.tfvars.bak)"
+  warn "prepending $CURRENT_EGRESS_IP/32 (backup at $TFVARS.bak)"
   backup_tfvars_once
-  sed -i.tmp "s|admin_cidrs = \[|admin_cidrs = [\"$CURRENT_EGRESS_IP/32\", |" terraform.tfvars
-  rm -f terraform.tfvars.tmp
-  ok "$(grep '^admin_cidrs' terraform.tfvars)"
+  sed -i.tmp "s|admin_cidrs = \[|admin_cidrs = [\"$CURRENT_EGRESS_IP/32\", |" "$TFVARS"
+  rm -f "$TFVARS.tmp"
+  ok "$(grep '^admin_cidrs' "$TFVARS")"
   ok "terraform apply will update the firewall rules to allow this IP (~30s of churn)"
 }
 
@@ -287,7 +292,7 @@ deploy() {
 verify() {
   step "Verify cluster"
   local n1
-  n1=$(terraform output -json node_external_ips 2>/dev/null | jq -r '.n1 // ""')
+  n1=$(terraform -chdir="$TF_DIR" output -json node_external_ips 2>/dev/null | jq -r '.n1 // ""')
   [[ -n "$n1" ]] || die "no node IPs in terraform output. Did the deploy succeed?"
 
   local key="${SSH_KEY_PATH%.pub}"
@@ -298,8 +303,8 @@ verify() {
 
   green ""
   green "Cluster is up. Useful next steps:"
-  echo "  Admin UI         $(terraform output -raw admin_ui_url)"
-  echo "  All node IPs     terraform output node_external_ips"
+  echo "  Admin UI         $(terraform -chdir="$TF_DIR" output -raw admin_ui_url)"
+  echo "  All node IPs     terraform -chdir=$TF_DIR output node_external_ips"
   echo "  SSH to a node    ssh crdb@$n1"
   echo "  Tear it down     PROJECT_ID=$PROJECT_ID $0 destroy"
 
@@ -308,8 +313,8 @@ verify() {
   # the controller-side stash if it exists; otherwise note that one was set
   # explicitly via crdb_admin_password and won't be re-displayed here.
   local admin_user admin_pw_file admin_pw_explicit
-  admin_user=$(terraform output -json ansible_group_vars 2>/dev/null | jq -r '.crdb_admin_user // ""')
-  admin_pw_explicit=$(terraform output -json ansible_group_vars 2>/dev/null | jq -r '.crdb_admin_password // ""')
+  admin_user=$(terraform -chdir="$TF_DIR" output -json ansible_group_vars 2>/dev/null | jq -r '.crdb_admin_user // ""')
+  admin_pw_explicit=$(terraform -chdir="$TF_DIR" output -json ansible_group_vars 2>/dev/null | jq -r '.crdb_admin_password // ""')
   admin_pw_file="ansible/certs/admin_password.txt"
 
   if [[ -n "$admin_user" ]]; then
@@ -333,11 +338,11 @@ verify() {
 # --- destroy ---
 destroy() {
   step "Destroy cluster"
-  if [[ ! -d .terraform ]]; then
-    warn ".terraform/ missing — running terraform init first"
+  if [[ ! -d "$TF_DIR/.terraform" ]]; then
+    warn "$TF_DIR/.terraform/ missing — running terraform init first"
     make init >/dev/null
   fi
-  terraform destroy -auto-approve
+  terraform -chdir="$TF_DIR" destroy -auto-approve
   ok "destroy complete"
   green ""
   yellow "Note: GCS state bucket (gs://$STATE_BUCKET) and ansible/certs/"

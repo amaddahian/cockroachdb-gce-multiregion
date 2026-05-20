@@ -13,11 +13,11 @@ cd ~/scripts/terraform-crdb-gcp
 brew install terraform tflint ansible    # if not already
 pip install ansible-lint                  # for the lint step
 
-# Terraform
-terraform fmt -check -recursive
-terraform init
-terraform validate
-tflint --recursive                        # optional
+# Terraform (all .tf lives under terraform/gcp/)
+terraform -chdir=terraform/gcp fmt -check -recursive
+terraform -chdir=terraform/gcp init
+terraform -chdir=terraform/gcp validate
+tflint --recursive --chdir=terraform/gcp  # optional
 
 # Ansible
 cd ansible && ansible-lint                # role + playbook lint
@@ -50,10 +50,10 @@ You should see one `CONFIGURE ZONE` line per `ALTER` statement (13 total with th
 Plan is free. You don't pay until you `apply`. So run plan against your actual target project to catch the GCP-side bugs that local validation can't:
 
 ```bash
-cp terraform.tfvars.example terraform.tfvars
+cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars
 # fill in project_id and admin_cidrs
 
-terraform plan -out=plan.tfplan
+terraform -chdir=terraform/gcp plan -out=plan.tfplan
 ```
 
 What this catches: project ID typos, IAM/API gaps (Compute API not enabled, ADC not authed), region/zone names invalid for your project, machine-type quota you don't actually have, name collisions with existing resources. Plan will *resolve* every data source and every resource attribute against the live GCP API — anything that requires a real API call will surface here.
@@ -69,7 +69,7 @@ make deploy
 # ~10 min terraform apply (mostly VM boot) + ~5 min ansible-playbook
 # (storage format, chrony+cockroach install, certs, systemd, init, zone configs).
 
-N1=$(terraform output -json node_external_ips | jq -r '.n1')
+N1=$(terraform -chdir=terraform/gcp output -json node_external_ips | jq -r '.n1')
 NODE_SQL='sudo -u cockroach /usr/local/bin/cockroach sql --certs-dir=/var/lib/cockroach/certs --host=localhost'
 
 # Check 1: cluster came up, all 5 nodes live with three localities
@@ -92,13 +92,13 @@ ssh crdb@$N1 "$NODE_SQL -e \
 # expect: 5 replicas each, 2/2/1 spread, lease in us-central
 
 # Check 5: TLS verify-full works against the live admin UI
-curl --cacert ansible/certs/ca.crt -fsS "$(terraform output -raw admin_ui_url)/health" && echo OK
+curl --cacert ansible/certs/ca.crt -fsS "$(terraform -chdir=terraform/gcp output -raw admin_ui_url)/health" && echo OK
 
 # Check 6: admin UI reachable from your admin_cidr in a browser
-open "$(terraform output -raw admin_ui_url)"
+open "$(terraform -chdir=terraform/gcp output -raw admin_ui_url)"
 
 # Check 7: terraform idempotency — second apply should be a no-op
-terraform apply
+terraform -chdir=terraform/gcp apply
 # expect: "No changes. Your infrastructure matches the configuration."
 
 # Check 8: ansible idempotency — second provision should report all ok/skipped, no changed
@@ -123,7 +123,7 @@ Once Tier 4 passes, the *interesting* tests are about whether the topology survi
 The four tests below probe the boundary deliberately — each adds one more failure than the last.
 
 ```bash
-N3=$(terraform output -json node_external_ips | jq -r '.n3')
+N3=$(terraform -chdir=terraform/gcp output -json node_external_ips | jq -r '.n3')
 
 # Helper: run cockroach sql on n3 with a SQL string. Avoids quoting headaches.
 crdb_sql() {

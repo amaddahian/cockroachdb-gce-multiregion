@@ -46,7 +46,7 @@ Note: the CRDB `--locality` labels (`us-central`, `us-east-1`, `us-east-2`) are 
 
 **Machine sizing baseline.** `n2-standard-4` with a 250GB `pd-ssd` boot disk matches what `roachprod` reaches for as a sane default (`pkg/roachprod/vm/gce/gcloud.go`). It's enough to run the full `tpcc` workload at low warehouse counts and exercise the cluster for correctness work. Bump to `n2-standard-8`/`n2-standard-16` and 1TB+ for sustained production load — both are single variable changes.
 
-**Load balancers are opt-in at the Terraform layer.** Per-node internal + external IPs are always created and exposed as outputs so you can wire connection strings directly. Two LBs are available behind feature flags: a regional internal TCP NLB (`var.create_internal_lb`) for in-VPC clients, and a regional external NLB (`var.create_external_lb`) for a single public VIP fronting both SQL and admin UI. They add resources, health-check interactions, and another knob to tune — keep them off when you don't need them. `scripts/quickstart.sh` flips its own default to `--lb on` for the external LB (overrideable with `--lb off`) since the most common reason to spin this cluster up at all is "I want to hit it from my laptop"; the manual `make deploy` flow leaves both LBs off unless you set the tfvars.
+**Load balancers are opt-in at the Terraform layer.** Per-node internal + external IPs are always created and exposed as outputs so you can wire connection strings directly. Two LBs are available behind feature flags: a regional internal TCP NLB (`var.create_internal_lb`) for in-VPC clients, and a regional external NLB (`var.create_external_lb`) for a single public VIP fronting both SQL and admin UI. They add resources, health-check interactions, and another knob to tune — keep them off when you don't need them. `quickstart.sh` flips its own default to `--lb on` for the external LB (overrideable with `--lb off`) since the most common reason to spin this cluster up at all is "I want to hit it from my laptop"; the manual `make deploy` flow leaves both LBs off unless you set the tfvars.
 
 ## Architecture walkthrough
 
@@ -118,14 +118,21 @@ terraform-crdb-gcp/
 ├── README.md                # this file
 ├── TESTING.md               # tiered testing strategy
 ├── Makefile                 # init/plan/apply/inventory/provision/deploy/destroy/clean
+├── quickstart.sh            # one-command bring-up wrapper (preflight + deploy + verify)
 ├── .gitignore
-├── versions.tf              # terraform + google + null + local provider pins
-├── providers.tf             # google provider, project from var.project_id
-├── variables.tf             # project_id, admin_cidrs, machine_type, disk sizes, ...
-├── network.tf               # VPC, 3 regional subnets, 4 firewall rules
-├── nodes.tf                 # static IPs + data disks + 5 google_compute_instance
-├── outputs.tf               # node IPs, admin UI URL, structured `nodes` output for inventory
-├── terraform.tfvars.example # template — copy to terraform.tfvars
+├── terraform/
+│   └── gcp/                 # all Terraform for the GCP CockroachDB stack
+│       ├── versions.tf      # terraform + google + null + local provider pins
+│       ├── providers.tf     # google provider, project from var.project_id
+│       ├── variables.tf     # project_id, admin_cidrs, machine_type, disk sizes, ...
+│       ├── network.tf       # VPC, 3 regional subnets, 4 firewall rules
+│       ├── nodes.tf         # static IPs + data disks + 5 google_compute_instance
+│       ├── dns.tf           # optional internal DNS records (per-node A records)
+│       ├── lb.tf            # optional internal regional NLB (create_internal_lb)
+│       ├── lb_external.tf   # optional external regional NLB (create_external_lb)
+│       ├── outputs.tf       # node IPs, admin UI URL, structured `nodes` output for inventory
+│       ├── terraform.tfvars.example  # template — copy to terraform.tfvars
+│       └── backend.hcl.example       # template — copy to backend.hcl (GCS remote state)
 ├── ansible/
 │   ├── ansible.cfg
 │   ├── playbooks/site.yml
@@ -177,14 +184,14 @@ Prerequisites (all on the machine running `make deploy`):
 
 ### Single-command deploy (recommended)
 
-`scripts/quickstart.sh` wraps the full bring-up in one command, with pre-flight checks (terraform/ansible/jq/gcloud installed, ADC ready, SSH key present), auto-detection of your external IP for `admin_cidrs`, idempotent state-bucket bootstrap, and end-to-end verify:
+`quickstart.sh` wraps the full bring-up in one command, with pre-flight checks (terraform/ansible/jq/gcloud installed, ADC ready, SSH key present), auto-detection of your external IP for `admin_cidrs`, idempotent state-bucket bootstrap, and end-to-end verify:
 
 ```bash
-PROJECT_ID=my-project ./scripts/quickstart.sh                        # deploy + verify (external LB ON by default)
-PROJECT_ID=my-project ./scripts/quickstart.sh deploy --lb off        # deploy without the external LB
-PROJECT_ID=my-project ./scripts/quickstart.sh deploy --lb-region us-east4  # LB in a non-default region
-PROJECT_ID=my-project ./scripts/quickstart.sh destroy                # tear down
-PROJECT_ID=my-project ./scripts/quickstart.sh redeploy --lb off      # destroy + redeploy without LB
+PROJECT_ID=my-project ./quickstart.sh                        # deploy + verify (external LB ON by default)
+PROJECT_ID=my-project ./quickstart.sh deploy --lb off        # deploy without the external LB
+PROJECT_ID=my-project ./quickstart.sh deploy --lb-region us-east4  # LB in a non-default region
+PROJECT_ID=my-project ./quickstart.sh destroy                # tear down
+PROJECT_ID=my-project ./quickstart.sh redeploy --lb off      # destroy + redeploy without LB
 ```
 
 **Flags** (apply to `deploy` and `redeploy`):
@@ -208,19 +215,19 @@ If you want to walk through it manually, in order:
 **1. Variables.** Copy the example tfvars (only if it doesn't already exist — `-n` is no-clobber so re-running the quickstart won't wipe your customized file):
 
 ```bash
-cp -n terraform.tfvars.example terraform.tfvars
+cp -n terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars
 ```
 
-Open `terraform.tfvars` and set `project_id`, `admin_cidrs` (your `/32` at minimum), and `ssh_pubkey_path` (the example default is `~/.ssh/id_ed25519.pub` — change this if your key is at a different path). The placeholders (`my-gcp-project-id`, `1.2.3.4/32`) will fail at plan time with confusing errors, so don't skip the edit.
+Open `terraform/gcp/terraform.tfvars` and set `project_id`, `admin_cidrs` (your `/32` at minimum), and `ssh_pubkey_path` (the example default is `~/.ssh/id_ed25519.pub` — change this if your key is at a different path). The placeholders (`my-gcp-project-id`, `1.2.3.4/32`) will fail at plan time with confusing errors, so don't skip the edit.
 
 **2. Remote state (recommended).** Create a versioned GCS bucket for Terraform state and point Terraform at it. Skip this and Terraform falls back to local state — fine for demos, risky for anything you'll come back to.
 
 ```bash
 PROJECT_ID=cockroach-ali make bootstrap-state
-cp -n backend.hcl.example backend.hcl
+cp -n terraform/gcp/backend.hcl.example terraform/gcp/backend.hcl
 ```
 
-Open `backend.hcl` and replace `<your-project-id>` with your actual project ID. The result should look like:
+Open `terraform/gcp/backend.hcl` and replace `<your-project-id>` with your actual project ID. The result should look like:
 
 ```hcl
 bucket = "cockroach-ali-tfstate-crdb"
@@ -245,13 +252,13 @@ What `make deploy` produces:
 - `ansible/inventory/hosts.yml` (gitignored) for re-runs
 - A live, initialized 5-node multi-region cluster with the zone configs applied
 
-Useful outputs:
+Useful outputs (run from the repo root):
 
 ```bash
-terraform output node_external_ips
-terraform output node_internal_ips
-terraform output admin_ui_url
-terraform output -raw sql_connection_string_root
+terraform -chdir=terraform/gcp output node_external_ips
+terraform -chdir=terraform/gcp output node_internal_ips
+terraform -chdir=terraform/gcp output admin_ui_url
+terraform -chdir=terraform/gcp output -raw sql_connection_string_root
 ```
 
 (`sql_connection_string_root` is marked `sensitive`; that's why it needs `-raw`.)
@@ -296,7 +303,7 @@ make provision-check
 > For a fuller testing strategy — static checks, SQL sanity tests, plan-time checks, real-apply verification, failure-injection — see [TESTING.md](./TESTING.md).
 
 ```bash
-N1=$(terraform output -json node_external_ips | jq -r '.n1')
+N1=$(terraform -chdir=terraform/gcp output -json node_external_ips | jq -r '.n1')
 
 # 5 nodes live, three distinct localities (us-central / us-east-1 / us-east-2)
 ssh crdb@$N1 "sudo -u cockroach /usr/local/bin/cockroach node status \
@@ -377,7 +384,7 @@ dns_name_template    = "crdb-{n}.cluster.example.com."   # trailing dot required
 dns_use_internal_ips = false   # true for private zones
 ```
 
-`terraform output dns_records` lists the FQDNs once created.
+`terraform -chdir=terraform/gcp output dns_records` lists the FQDNs once created.
 
 ### Internal load balancer (opt-in)
 
@@ -388,7 +395,7 @@ create_internal_lb = true
 internal_lb_region = "us-central1"   # must be one of var.topology[*].region
 ```
 
-`terraform output internal_lb_ip` exposes the VIP. From a node:
+`terraform -chdir=terraform/gcp output internal_lb_ip` exposes the VIP. From a node:
 
 ```bash
 cockroach sql --certs-dir=/var/lib/cockroach/certs --host=<LB_IP>:26257 -e 'SELECT 1'
@@ -398,14 +405,14 @@ cockroach sql --certs-dir=/var/lib/cockroach/certs --host=<LB_IP>:26257 -e 'SELE
 
 A regional **external** Network Load Balancer with a public IP, fronting **both** the SQL port (26257) and the admin UI (8080). Use this when you want a single public VIP reachable from your laptop or any client outside the VPC, instead of pinning to per-node IPs.
 
-> The Terraform variable defaults to `false` (opt-in), but `scripts/quickstart.sh` defaults to `--lb on` — so a quickstart-driven deploy creates this LB unless you pass `--lb off`. The manual `make deploy` flow uses the Terraform default and requires you to enable it via `terraform.tfvars` below.
+> The Terraform variable defaults to `false` (opt-in), but `quickstart.sh` defaults to `--lb on` — so a quickstart-driven deploy creates this LB unless you pass `--lb off`. The manual `make deploy` flow uses the Terraform default and requires you to enable it via `terraform.tfvars` below.
 
 ```hcl
 create_external_lb = true
 external_lb_region = "us-central1"   # must be one of var.topology[*].region
 ```
 
-`terraform output external_lb_ip` exposes the public VIP.
+`terraform -chdir=terraform/gcp output external_lb_ip` exposes the public VIP.
 
 Specifics:
 
@@ -435,7 +442,7 @@ Common tasks against a running cluster.
 ### Connect to the cluster
 
 ```bash
-N1=$(terraform output -json node_external_ips | jq -r '.n1')
+N1=$(terraform -chdir=terraform/gcp output -json node_external_ips | jq -r '.n1')
 
 # SSH to a node (admin shell)
 ssh crdb@$N1
@@ -506,7 +513,7 @@ Refuses to run if `var.crdb_admin_password` is set explicitly (you manage it; we
 ```bash
 make clean-ca                              # destructive: deletes ansible/certs/
 make destroy                               # remove the cluster (node certs go with it)
-PROJECT_ID=… ./scripts/quickstart.sh       # fresh deploy regenerates the CA
+PROJECT_ID=… ./quickstart.sh       # fresh deploy regenerates the CA
 ```
 
 ### Trust the CA in your macOS keychain
@@ -523,7 +530,7 @@ To untrust later: `sudo security delete-certificate -c "Cockroach CA" -t /Librar
 ### Tear it all down
 
 ```bash
-PROJECT_ID=… ./scripts/quickstart.sh destroy   # removes the 28 GCP resources
+PROJECT_ID=… ./quickstart.sh destroy   # removes the 28 GCP resources
 make clean-ca                                  # optional: also rotate the CA
 gcloud storage rm -r gs://${PROJECT_ID}-tfstate-crdb   # optional: also delete state bucket
 ```
@@ -554,13 +561,13 @@ Symptom: 5-minute timeout on every node from the `wait_for_connection` pre-task.
 
 **Cause:** your egress IP isn't in `var.admin_cidrs`. The GCE firewall (`allow-ssh`) only opens port 22 to the listed CIDRs, so SSH connections silently drop.
 
-**Fix:** the `scripts/quickstart.sh` flow auto-detects this — it queries `checkip.amazonaws.com`, compares against the CIDRs in `terraform.tfvars`, and prepends `<your-ip>/32` if not covered (saving a backup at `terraform.tfvars.bak`). The follow-up `terraform apply` updates the firewall rule and the playbook can connect.
+**Fix:** the `quickstart.sh` flow auto-detects this — it queries `checkip.amazonaws.com`, compares against the CIDRs in `terraform/gcp/terraform.tfvars`, and prepends `<your-ip>/32` if not covered (saving a backup at `terraform/gcp/terraform.tfvars.bak`). The follow-up `terraform apply` updates the firewall rule and the playbook can connect.
 
 If you bypass the script and `make deploy` directly, fix manually:
 
 ```bash
-sed -i '' "s|admin_cidrs = \[|admin_cidrs = [\"$(curl -s https://checkip.amazonaws.com)/32\", |" terraform.tfvars
-terraform apply -auto-approve   # ~30s, only firewall rules change
+sed -i '' "s|admin_cidrs = \[|admin_cidrs = [\"$(curl -s https://checkip.amazonaws.com)/32\", |" terraform/gcp/terraform.tfvars
+terraform -chdir=terraform/gcp apply -auto-approve   # ~30s, only firewall rules change
 ```
 
 ### One VM unreachable, others fine
@@ -630,9 +637,9 @@ Or pass `-o StrictHostKeyChecking=accept-new` to the `ssh` invocation to accept 
 
 Symptom: `terraform apply` errors with `no file exists at "/Users/.../.ssh/id_ed25519.pub"` or shows `project = "my-gcp-project-id"` in the plan.
 
-**Cause:** you re-ran `cp terraform.tfvars.example terraform.tfvars` and clobbered your customized file. The example contains placeholders.
+**Cause:** you re-ran `cp terraform/gcp/terraform.tfvars.example terraform/gcp/terraform.tfvars` and clobbered your customized file. The example contains placeholders.
 
-**Fix:** the README quickstart now uses `cp -n` (no-clobber) and `scripts/quickstart.sh` refuses to deploy if it detects placeholder values still in `terraform.tfvars`. If you hit this manually: re-edit your `project_id`, `admin_cidrs`, and `ssh_pubkey_path` to your real values.
+**Fix:** the README quickstart now uses `cp -n` (no-clobber) and `quickstart.sh` refuses to deploy if it detects placeholder values still in `terraform.tfvars`. If you hit this manually: re-edit your `project_id`, `admin_cidrs`, and `ssh_pubkey_path` to your real values.
 
 ## Roadmap / out of scope
 
@@ -647,4 +654,4 @@ Reasonable next steps: a `BACKUP INTO 'gs://...'` schedule (which would also nee
 
 ## License & contributing
 
-Apache-2.0. Pull requests welcome — keep them focused, include the rationale, and please run `terraform fmt` and `terraform validate` before opening.
+Apache-2.0. Pull requests welcome — keep them focused, include the rationale, and please run `make fmt` and `make validate` before opening.
