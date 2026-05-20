@@ -203,6 +203,8 @@ PROJECT_ID=my-project ./quickstart.sh redeploy --lb off      # destroy + redeplo
 
 Optional env overrides: `SSH_KEY_PATH` (default auto-detects `~/.ssh/id_*.pub`), `ADMIN_CIDRS` (comma-separated, default auto-detects via `checkip.amazonaws.com`), `STATE_LOCATION` (default `us-central1`).
 
+**Next step — actually exercise it.** Once the deploy succeeds, `./workload.sh` provisions a small workload-generator VM, installs the `cockroach` binary + certs, and runs `cockroach workload run kv` against all cluster nodes in one command. See [Operations → Workload VM (opt-in)](#workload-vm-opt-in) for the full lifecycle and sub-commands.
+
 ### Step by step (manual flow)
 
 <details>

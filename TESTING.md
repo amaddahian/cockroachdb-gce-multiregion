@@ -111,7 +111,15 @@ make provision
 # expect: play fails with "Existing node.crt found ... but the controller-side CA ... is missing"
 mv ansible/certs.bak ansible/certs
 
+# Check 10: workload runs cleanly against all 3 regions (adds the workload VM, ~$0.20/hr)
+./workload.sh
+# expect: 60s `cockroach workload run kv` finishes with non-zero ops/sec and finite p99.
+# Catches: TLS misconfiguration, SQL listener regressions, intra-VPC firewall
+# drift, and any change that breaks write throughput. The script installs
+# the cockroach binary + scps certs idempotently on the first run.
+
 make destroy
+./workload.sh down   # tear down the workload VM separately (its state is independent)
 ```
 
 If any of these fail, the bug is real and needs to land before the next apply. Watch the first run's Ansible output carefully — most issues surface in the certs role (SAN mismatches, ownership) or service role (missing locality vars in inventory).
