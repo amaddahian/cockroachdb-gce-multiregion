@@ -1,0 +1,8 @@
+# Copy to backend.hcl and fill in. Then run:
+#   make workload-init   (which runs: terraform -chdir=terraform/workload init -backend-config=backend.hcl)
+#
+# Reuses the same GCS bucket as the cluster stack but a different prefix so
+# the two states never collide.
+
+bucket = "<your-project-id>-tfstate-crdb"
+prefix = "workload"

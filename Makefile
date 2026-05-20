@@ -1,4 +1,4 @@
-.PHONY: help init plan apply inventory provision provision-check deploy destroy clean clean-ca rotate-admin-password fmt validate lint syntax-check verify
+.PHONY: help init plan apply inventory provision provision-check deploy destroy clean clean-ca rotate-admin-password fmt validate lint syntax-check verify workload-init workload-plan workload-apply workload-destroy
 
 # Default Ansible playbook args (override on the CLI: make provision EXTRA="--tags certs")
 EXTRA ?=
@@ -9,6 +9,8 @@ INVENTORY   := $(ANSIBLE_DIR)/inventory/hosts.yml
 RENDER      := $(ANSIBLE_DIR)/inventory/render.sh
 TF_DIR      := terraform/gcp
 TF          := terraform -chdir=$(TF_DIR)
+WL_DIR      := terraform/workload
+WL          := terraform -chdir=$(WL_DIR)
 
 help:
 	@echo "Targets:"
@@ -29,6 +31,12 @@ help:
 	@echo "  lint             ansible-lint"
 	@echo "  syntax-check     ansible-playbook --syntax-check"
 	@echo "  verify           validate + lint + syntax-check"
+	@echo ""
+	@echo "Workload VM (opt-in adjunct stack under $(WL_DIR)):"
+	@echo "  workload-init    terraform init for the workload stack (uses $(WL_DIR)/backend.hcl if present)"
+	@echo "  workload-plan    terraform plan for the workload stack"
+	@echo "  workload-apply   terraform apply for the workload stack"
+	@echo "  workload-destroy terraform destroy for the workload stack"
 
 init:
 	@if [ -f $(TF_DIR)/backend.hcl ]; then \
@@ -121,6 +129,29 @@ syntax-check: $(INVENTORY)
 	cd $(ANSIBLE_DIR) && ansible-playbook -i inventory/hosts.yml playbooks/site.yml --syntax-check
 
 verify: validate lint syntax-check
+
+# --- Workload VM (opt-in) ---------------------------------------------------
+# Spins up a single GCE VM in the cluster's primary region for running
+# `cockroach workload run` close to the cluster. See README "Workload VM
+# (opt-in)" for post-apply install steps (cockroach binary + certs).
+workload-init:
+	@if [ -f $(WL_DIR)/backend.hcl ]; then \
+	  echo "Initializing workload stack with remote state ($(WL_DIR)/backend.hcl)..."; \
+	  $(WL) init -backend-config=backend.hcl; \
+	else \
+	  echo "No $(WL_DIR)/backend.hcl found — initializing workload stack with local state."; \
+	  echo "Copy $(WL_DIR)/backend.hcl.example to $(WL_DIR)/backend.hcl for GCS-backed remote state."; \
+	  $(WL) init; \
+	fi
+
+workload-plan:
+	$(WL) plan
+
+workload-apply:
+	$(WL) apply $(APPROVE)
+
+workload-destroy:
+	$(WL) destroy
 
 $(INVENTORY):
 	@echo "ERROR: $(INVENTORY) does not exist. Run 'make inventory' (after 'terraform apply')." >&2

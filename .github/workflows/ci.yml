@@ -13,11 +13,15 @@ concurrency:
 
 jobs:
   terraform:
-    name: terraform fmt + validate
+    name: terraform fmt + validate (${{ matrix.stack }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [terraform/gcp, terraform/workload]
     defaults:
       run:
-        working-directory: terraform/gcp
+        working-directory: ${{ matrix.stack }}
     steps:
       - uses: actions/checkout@v4
 

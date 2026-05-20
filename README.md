@@ -537,6 +537,61 @@ gcloud storage rm -r gs://${PROJECT_ID}-tfstate-crdb   # optional: also delete s
 
 `terraform destroy` preserves the GCS state bucket and `ansible/certs/` so a future deploy reuses the same CA without rotating client certs. Two extra commands above to wipe each if you actually want a fresh start.
 
+### Workload VM (opt-in)
+
+A small adjunct stack at `terraform/workload/` provisions a single GCE VM in the cluster's primary region (default `us-central1`), on the same VPC, intended for running `cockroach workload run kv/tpcc/movr/...` against the cluster. It avoids the two problems with running workloads from a cluster node (the node is busy serving its own ranges) or from your laptop (egress bandwidth + cross-region latency). The stack is **completely separate** from the cluster — its own state, its own apply/destroy lifecycle — so you can spin it up only when you need it.
+
+```bash
+# 1. Configure (one-time)
+cp -n terraform/workload/terraform.tfvars.example terraform/workload/terraform.tfvars
+# edit terraform/workload/terraform.tfvars: project_id + admin_cidrs
+cp -n terraform/workload/backend.hcl.example terraform/workload/backend.hcl
+# edit terraform/workload/backend.hcl: bucket = "<your-project-id>-tfstate-crdb" (same bucket as the cluster)
+
+# 2. Stand it up (~60s)
+make workload-init
+make workload-apply
+```
+
+After apply, install the `cockroach` binary and copy certs from the controller-side `ansible/certs/`:
+
+```bash
+WL_IP=$(terraform -chdir=terraform/workload output -raw workload_vm_external_ip)
+
+# Install cockroach binary (matches the version used by the ansible role)
+ssh crdb@$WL_IP 'wget -qO- https://binaries.cockroachdb.com/cockroach-v25.4.0.linux-amd64.tgz \
+  | sudo tar -xz -C /tmp \
+  && sudo mv /tmp/cockroach-v25.4.0.linux-amd64/cockroach /usr/local/bin/'
+
+# Copy the CA + root client cert (reuses what the cluster deploy generated)
+ssh crdb@$WL_IP 'mkdir -p ~/certs && chmod 700 ~/certs'
+scp ansible/certs/ca.crt ansible/certs/client.root.crt ansible/certs/client.root.key crdb@$WL_IP:~/certs/
+ssh crdb@$WL_IP 'chmod 600 ~/certs/client.root.key'
+```
+
+Now run a workload. Grab a node's internal IP from the cluster outputs and shell into the workload VM:
+
+```bash
+NODE_IP=$(terraform -chdir=terraform/gcp output -json node_internal_ips | jq -r '.n1')
+CONN="postgresql://root@${NODE_IP}:26257?sslmode=verify-full&sslrootcert=/home/crdb/certs/ca.crt&sslcert=/home/crdb/certs/client.root.crt&sslkey=/home/crdb/certs/client.root.key"
+
+ssh crdb@$WL_IP "cockroach workload init kv '$CONN'"
+ssh crdb@$WL_IP "cockroach workload run kv --duration=5m --concurrency=64 '$CONN'"
+```
+
+Tear it down when you're done — the cluster stack is unaffected:
+
+```bash
+make workload-destroy
+```
+
+Cost: ~\$0.20/hr on top of the cluster's \$1.50/hr.
+
+Notes:
+- The workload VM uses the cluster's `root` client cert as a deliberate shortcut. A follow-up could provision a dedicated `workload` SQL user with its own cert if you care about audit separation.
+- The cluster's `allow-internal` firewall rule already permits any VPC source to reach nodes on 26257 — the workload VM gets that access by virtue of sitting in one of the cluster's subnets. No cluster-side firewall changes were needed.
+- The workload stack's `network_name` var must match the cluster stack's (default `"crdb"`); the workload stack uses `data` sources to look up the existing VPC + subnet by name.
+
 ## Cost
 
 The default 5-node `n2-standard-4` topology costs roughly **\$1.50/hr** while running:
